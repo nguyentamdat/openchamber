@@ -1,0 +1,70 @@
+{
+  // Theme metadata shown in OpenChamber theme selector.
+  "metadata": {
+    "id": "palette-starter",
+    "name": "Palette Starter",
+    "description": "Balanced palette schema for generating OpenChamber light and dark themes",
+    "author": "Your Name",
+    "version": "1.0.0",
+    "tags": ["custom", "palette"]
+  },
+
+  // Palette is split into shared semantic hues + variant-specific neutral ramps.
+  "palette": {
+    // Shared hues used by both generated light and dark themes.
+    "shared": {
+      "accentPrimary": "#BC5215", // Main action color: Send button, primary toggles, focused input outline, active switches, emphasized chips
+      "accentSecondary": "#205EA6", // Navigation/link color: clickable links in chat and markdown, secondary buttons, selected tabs, keyword-like highlights
+      "accentTertiary": "#5E409D", // Supporting accent: merged PR pill, alternate badges, optional decorative emphasis where a 3rd accent is needed
+      "syntaxString": "#24837B", // Code/markdown inline string color: quoted text, regex-like literals, string tokens in code blocks
+      "syntaxNumber": "#5E409D", // Code numeric/constant color: numbers, numeric constants, enum-like fixed values
+      "syntaxType": "#AD8301", // Type-system color: class/type/interface names, decorators/annotations, markdown list markers
+      "syntaxTag": "#205EA6", // Markup tag color: HTML/JSX/XML tag names and related token labels
+      "syntaxSpecial": "#A02F6F", // Special token color: labels, globals, preprocessor/macro-like items, rare high-attention code tokens
+      "statusSuccess": "#66800B", // Positive state color: success toasts, "completed" indicators, added lines in diffs, "open" PR state
+      "statusWarning": "#BC5215", // Warning state color: caution toasts, "attention needed" badges, blocked/at-risk labels
+      "statusError": "#AF3029", // Error/destructive color: error toasts, danger buttons, failed states, removed lines in diffs, closed/error pills
+      "statusInfo": "#205EA6" // Informational state color: info toasts, neutral notices, modified lines in diffs
+    },
+
+    // Light variant neutrals (paper-like UI surfaces).
+    "light": {
+      "neutral": {
+        "canvas": "#FFFCF0", // App canvas: full-page background behind chat, sidebars, settings pages
+        "surface": "#F2F0E5", // Main containers: sidebar blocks, cards, code block background, tool panels
+        "surfaceAlt": "#FDF6EC", // Raised containers: popovers, dropdown menus, modal bodies, elevated cards
+        "surfaceSubtle": "#F6F0E6", // Soft highlight surfaces: subtle section backgrounds, assistant/user separators, inactive chips
+        "text": "#100F0F", // Primary readable text: chat content, settings labels, headings, important metadata
+        "textMuted": "#474643", // Secondary text: descriptions, helper text, non-primary labels, tab subtitles
+        "textDim": "#6F6E69", // Tertiary text: timestamps, placeholders, disabled labels, less-important UI hints
+        "border": "#DAD8CE", // Default stroke color: card borders, input borders, separators, table/grid lines
+        "borderStrong": "#CECDC3", // Strong stroke color: hover/focus border variants, active panel boundary, selected item outline support
+        "selection": "#76736F", // Selection base color: text selection and row highlight (script adds alpha)
+        "overlay": "#100F0F", // Scrim base for dialogs/drawers: darkens background behind modals
+        "chatUserBubble": "#F6F0E6", // User message bubble fill in chat thread
+        "toolsBackground": "#F2F0E5", // Tool output box background (edits, diagnostics, generated file blocks)
+        "syntaxComment": "#6F6E69" // Comment/punctuation-low-emphasis color in code blocks and diffs
+      }
+    },
+
+    // Dark variant neutrals (inky UI surfaces).
+    "dark": {
+      "neutral": {
+        "canvas": "#151313", // App canvas: full-page background behind chat, sidebars, settings pages
+        "surface": "#1C1B1A", // Main containers: sidebar blocks, cards, code block background, tool panels
+        "surfaceAlt": "#1C1A19", // Raised containers: popovers, dropdown menus, modal bodies, elevated cards
+        "surfaceSubtle": "#1E1D1C", // Soft highlight surfaces: subtle section backgrounds, assistant/user separators, inactive chips
+        "text": "#CECDC3", // Primary readable text: chat content, settings labels, headings, important metadata
+        "textMuted": "#878580", // Secondary text: descriptions, helper text, non-primary labels, tab subtitles
+        "textDim": "#575653", // Tertiary text: timestamps, placeholders, disabled labels, less-important UI hints
+        "border": "#343331", // Default stroke color: card borders, input borders, separators, table/grid lines
+        "borderStrong": "#403E3C", // Strong stroke color: hover/focus border variants, active panel boundary, selected item outline support
+        "selection": "#F4F4F4", // Selection base color: text selection and row highlight (script adds alpha)
+        "overlay": "#000000", // Scrim base for dialogs/drawers: darkens background behind modals
+        "chatUserBubble": "#27180E", // User message bubble fill in chat thread
+        "toolsBackground": "#1C1B1A", // Tool output box background (edits, diagnostics, generated file blocks)
+        "syntaxComment": "#878580" // Comment/punctuation-low-emphasis color in code blocks and diffs
+      }
+    }
+  }
+}
