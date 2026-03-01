@@ -96,7 +96,24 @@ const MERMAID_RENDERING_OPTIONS: Option<'svg' | 'ascii'>[] = [
     },
 ];
 
-export type VisibleSetting = 'theme' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'cornerRadius' | 'inputBarOffset' | 'navRail' | 'toolOutput' | 'mermaidRendering' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'reasoning' | 'queueMode' | 'textJustificationActivity' | 'terminalQuickKeys' | 'persistDraft';
+const USER_MESSAGE_RENDERING_OPTIONS: Option<'markdown' | 'plain'>[] = [
+    {
+        id: 'markdown',
+        label: 'Markdown',
+        description: 'Render user text with markdown formatting.',
+    },
+    {
+        id: 'plain',
+        label: 'Plain text',
+        description: 'Render user text with preserved whitespace and links.',
+    },
+];
+
+const normalizeUserMessageRenderingMode = (mode: unknown): 'markdown' | 'plain' => {
+    return mode === 'markdown' ? 'markdown' : 'plain';
+};
+
+export type VisibleSetting = 'theme' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'cornerRadius' | 'inputBarOffset' | 'navRail' | 'toolOutput' | 'mermaidRendering' | 'userMessageRendering' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'reasoning' | 'queueMode' | 'textJustificationActivity' | 'terminalQuickKeys' | 'persistDraft';
 
 interface OpenChamberVisualSettingsProps {
     /** Which settings to show. If undefined, shows all. */
@@ -114,6 +131,8 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
     const setToolCallExpansion = useUIStore(state => state.setToolCallExpansion);
     const mermaidRenderingMode = useUIStore(state => state.mermaidRenderingMode);
     const setMermaidRenderingMode = useUIStore(state => state.setMermaidRenderingMode);
+    const userMessageRenderingMode = useUIStore(state => state.userMessageRenderingMode);
+    const setUserMessageRenderingMode = useUIStore(state => state.setUserMessageRenderingMode);
     const fontSize = useUIStore(state => state.fontSize);
     const setFontSize = useUIStore(state => state.setFontSize);
     const terminalFontSize = useUIStore(state => state.terminalFontSize);
@@ -190,6 +209,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
     const hasNavigationSettings = (!isMobile && shouldShow('navRail')) || (shouldShow('terminalQuickKeys') && !isMobile);
     const hasBehaviorSettings = shouldShow('toolOutput')
         || shouldShow('mermaidRendering')
+        || shouldShow('userMessageRendering')
         || shouldShow('diffLayout')
         || (shouldShow('mobileStatusBar') && isMobile)
         || shouldShow('dotfiles')
@@ -598,6 +618,42 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                                         checked={selected}
                                                         onChange={() => setMermaidRenderingMode(option.id)}
                                                         ariaLabel={`Mermaid rendering: ${option.label}`}
+                                                    />
+                                                    <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
+                                                        {option.label}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </section>
+                            )}
+
+                            {shouldShow('userMessageRendering') && (
+                                <section className="p-2">
+                                    <h4 className="typography-ui-header font-medium text-foreground">User Message Rendering</h4>
+                                    <div role="radiogroup" aria-label="User message rendering mode" className="mt-1 space-y-0">
+                                        {USER_MESSAGE_RENDERING_OPTIONS.map((option) => {
+                                            const selected = normalizeUserMessageRenderingMode(userMessageRenderingMode) === option.id;
+                                            return (
+                                                <div
+                                                    key={option.id}
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    aria-pressed={selected}
+                                                    onClick={() => setUserMessageRenderingMode(option.id)}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === ' ' || event.key === 'Enter') {
+                                                            event.preventDefault();
+                                                            setUserMessageRenderingMode(option.id);
+                                                        }
+                                                    }}
+                                                    className="flex w-full items-center gap-2 py-0.5 text-left"
+                                                >
+                                                    <Radio
+                                                        checked={selected}
+                                                        onChange={() => setUserMessageRenderingMode(option.id)}
+                                                        ariaLabel={`User message rendering: ${option.label}`}
                                                     />
                                                     <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
                                                         {option.label}

@@ -9,6 +9,7 @@ export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files';
 export type RightSidebarTab = 'git' | 'files';
 export type ContextPanelMode = 'diff' | 'file' | 'context' | 'plan';
 export type MermaidRenderingMode = 'svg' | 'ascii';
+export type UserMessageRenderingMode = 'markdown' | 'plain';
 
 type ContextPanelDirectoryState = {
   isOpen: boolean;
@@ -224,6 +225,7 @@ interface UIStore {
   showTerminalQuickKeysOnDesktop: boolean;
   persistChatDraft: boolean;
   mermaidRenderingMode: MermaidRenderingMode;
+  userMessageRenderingMode: UserMessageRenderingMode;
   showMobileSessionStatusBar: boolean;
   isMobileSessionStatusBarCollapsed: boolean;
   viewPagerPage: 'left' | 'center' | 'right';
@@ -323,6 +325,7 @@ interface UIStore {
   setMaxLastMessageLength: (value: number) => void;
   setPersistChatDraft: (value: boolean) => void;
   setMermaidRenderingMode: (value: MermaidRenderingMode) => void;
+  setUserMessageRenderingMode: (value: UserMessageRenderingMode) => void;
   setShowMobileSessionStatusBar: (value: boolean) => void;
   setIsMobileSessionStatusBarCollapsed: (value: boolean) => void;
   setViewPagerPage: (page: 'left' | 'center' | 'right') => void;
@@ -427,6 +430,7 @@ export const useUIStore = create<UIStore>()(
         showTerminalQuickKeysOnDesktop: false,
         persistChatDraft: true,
         mermaidRenderingMode: 'svg',
+        userMessageRenderingMode: 'markdown',
         showMobileSessionStatusBar: true,
         isMobileSessionStatusBarCollapsed: false,
         isExpandedInput: false,
@@ -1224,6 +1228,9 @@ export const useUIStore = create<UIStore>()(
         setMermaidRenderingMode: (value) => {
           set({ mermaidRenderingMode: value });
         },
+        setUserMessageRenderingMode: (value) => {
+          set({ userMessageRenderingMode: value });
+        },
         setShowMobileSessionStatusBar: (value) => {
           set({ showMobileSessionStatusBar: value });
         },
@@ -1394,6 +1401,7 @@ export const useUIStore = create<UIStore>()(
           maxLastMessageLength: state.maxLastMessageLength,
           persistChatDraft: state.persistChatDraft,
           mermaidRenderingMode: state.mermaidRenderingMode,
+          userMessageRenderingMode: state.userMessageRenderingMode,
           showMobileSessionStatusBar: state.showMobileSessionStatusBar,
           isMobileSessionStatusBarCollapsed: state.isMobileSessionStatusBarCollapsed,
           shortcutOverrides: state.shortcutOverrides,
