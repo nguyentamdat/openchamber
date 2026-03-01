@@ -503,6 +503,10 @@ html:not(.dark) .chat-scroll {
   scrollbar-gutter: auto !important;
 }
 
+.overlay-scrollbar-target--no-gutter {
+  scrollbar-gutter: unset !important;
+}
+
 .overlay-scrollbar-target::-webkit-scrollbar {
   width: 0 !important;
   height: 0 !important;

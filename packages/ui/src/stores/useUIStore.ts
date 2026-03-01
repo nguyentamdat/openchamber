@@ -512,6 +512,7 @@ interface UIStore {
 
   favoriteModels: Array<{ providerID: string; modelID: string }>;
   hiddenModels: Array<{ providerID: string; modelID: string }>;
+  collapsedModelProviders: string[];
   recentModels: Array<{ providerID: string; modelID: string }>;
   recentAgents: string[];
   recentEfforts: Record<string, string[]>;
@@ -630,6 +631,7 @@ interface UIStore {
   isHiddenModel: (providerID: string, modelID: string) => boolean;
   hideAllModels: (providerID: string, modelIDs: string[]) => void;
   showAllModels: (providerID: string) => void;
+  toggleModelProviderCollapsed: (providerID: string) => void;
   isFavoriteModel: (providerID: string, modelID: string) => boolean;
   addRecentModel: (providerID: string, modelID: string) => void;
   addRecentAgent: (agentName: string) => void;
@@ -729,6 +731,7 @@ export const useUIStore = create<UIStore>()(
         inputBarOffset: 0,
         favoriteModels: [],
         hiddenModels: [],
+        collapsedModelProviders: [],
         recentModels: [],
         recentAgents: [],
         recentEfforts: {},
@@ -1482,6 +1485,26 @@ export const useUIStore = create<UIStore>()(
           }));
         },
 
+        toggleModelProviderCollapsed: (providerID) => {
+          const normalizedProviderID = typeof providerID === 'string' ? providerID.trim() : '';
+          if (!normalizedProviderID) {
+            return;
+          }
+
+          set((state) => {
+            const isCollapsed = state.collapsedModelProviders.includes(normalizedProviderID);
+            if (isCollapsed) {
+              return {
+                collapsedModelProviders: state.collapsedModelProviders.filter((id) => id !== normalizedProviderID),
+              };
+            }
+
+            return {
+              collapsedModelProviders: [...state.collapsedModelProviders, normalizedProviderID],
+            };
+          });
+        },
+
         isFavoriteModel: (providerID, modelID) => {
           const { favoriteModels } = get();
           return favoriteModels.some(
@@ -1794,6 +1817,7 @@ export const useUIStore = create<UIStore>()(
           cornerRadius: state.cornerRadius,
           favoriteModels: state.favoriteModels,
           hiddenModels: state.hiddenModels,
+          collapsedModelProviders: state.collapsedModelProviders,
           recentModels: state.recentModels,
           recentAgents: state.recentAgents,
           recentEfforts: state.recentEfforts,
