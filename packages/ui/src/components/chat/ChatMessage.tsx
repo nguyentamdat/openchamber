@@ -166,6 +166,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     const messageRole = React.useMemo(() => deriveMessageRole(message.info), [message.info]);
     const isUser = messageRole.isUser;
     const useExternalUserActionsRow = isUser && (isMobile || !stickyUserHeader);
+    const showStickyInlineHoverRow = isUser && !isMobile && stickyUserHeader && !useExternalUserActionsRow;
 
     const sessionId = message.info.sessionID;
 
@@ -961,8 +962,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                     {isUser ? (
                         displayParts.length === 0 ? null : (
                         <FadeInOnReveal>
-                            <div className="flex justify-end">
-                                <div className={cn('max-w-[85%]', useExternalUserActionsRow ? 'group/user-shell' : undefined)}>
+                            <div className={cn('relative flex justify-end', !isMobile ? 'group/user-shell' : undefined)}>
+                                <div className="max-w-[85%]">
                                     <div style={{ backgroundColor: 'var(--chat-user-message-bg)' }} className="rounded-2xl rounded-br-sm px-5 py-3 shadow-none border border-primary/5">
                                         <MessageBody
                                             messageId={message.info.id}
@@ -1028,6 +1029,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                         />
                                     ) : null}
                                 </div>
+                                {showStickyInlineHoverRow ? <div aria-hidden="true" className="absolute left-0 right-0 top-full h-11" /> : null}
                             </div>
                         </FadeInOnReveal>
                         )
