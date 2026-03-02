@@ -10,16 +10,15 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import {
   RiGithubLine,
   RiLoader4Line,
   RiSearchLine,
   RiErrorWarningLine,
   RiCheckLine,
-  RiExternalLinkLine,
   RiGitPullRequestLine,
   RiGitBranchLine,
+  RiCloseLine,
 } from '@remixicon/react';
 import { cn } from '@/lib/utils';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
@@ -276,7 +275,7 @@ export function GitHubIntegrationDialog({
   const handleClear = () => {
     setSelectedIssue(null);
     setSelectedPr(null);
-    onSelect(null);
+    setIncludeDiff(false);
   };
 
   // Check if selection is valid
@@ -291,13 +290,13 @@ export function GitHubIntegrationDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col p-0">
-        <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4 border-b border-border/50">
-          <DialogTitle className="flex items-center gap-2 typography-ui-header font-semibold">
+      <DialogContent className="max-w-2xl max-h-[70vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
             <RiGithubLine className="h-5 w-5" />
             Select from GitHub
           </DialogTitle>
-          <DialogDescription className="typography-small text-muted-foreground">
+          <DialogDescription>
             Choose an issue or pull request to link to your worktree
           </DialogDescription>
         </DialogHeader>
@@ -311,26 +310,26 @@ export function GitHubIntegrationDialog({
                 Link issues or pull requests to auto-fill worktree details
               </p>
             </div>
-            <Button onClick={openGitHubSettings}>Connect GitHub</Button>
+            <Button onClick={openGitHubSettings} size="sm">Connect GitHub</Button>
           </div>
         ) : (
           <>
-            {/* Tabs */}
-            <div className="flex-shrink-0 px-6 py-3 border-b border-border/50">
-              <div className="flex items-center gap-1 p-1 bg-muted rounded-lg w-fit">
+            {/* Tabs and Selected Item Row */}
+            <div className="flex items-center justify-between mt-2">
+              <div className="flex items-center gap-1 p-1 bg-muted rounded-lg">
                 <button
                   onClick={() => {
                     setActiveTab('issues');
                     setSearchQuery('');
                   }}
                   className={cn(
-                    'flex items-center gap-2 px-3 py-1.5 rounded-md typography-ui-label transition-all',
+                    'flex items-center gap-1.5 px-3 py-1 rounded-md typography-ui-label transition-all',
                     activeTab === 'issues'
                       ? 'bg-background text-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground hover:bg-muted-foreground/5'
                   )}
                 >
-                  <RiGitBranchLine className="h-4 w-4" />
+                  <RiGitBranchLine className="h-3.5 w-3.5" />
                   Issues
                 </button>
                 <button
@@ -339,258 +338,211 @@ export function GitHubIntegrationDialog({
                     setSearchQuery('');
                   }}
                   className={cn(
-                    'flex items-center gap-2 px-3 py-1.5 rounded-md typography-ui-label transition-all',
+                    'flex items-center gap-1.5 px-3 py-1 rounded-md typography-ui-label transition-all',
                     activeTab === 'prs'
                       ? 'bg-background text-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground hover:bg-muted-foreground/5'
                   )}
                 >
-                  <RiGitPullRequestLine className="h-4 w-4" />
+                  <RiGitPullRequestLine className="h-3.5 w-3.5" />
                   Pull Requests
                 </button>
               </div>
+
+              {/* Selected Item Inline Display */}
+              {(selectedIssue || selectedPr) && (
+                <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-muted/50 border border-border/50 max-w-[50%]">
+                  <RiCheckLine className="h-3.5 w-3.5 text-status-success shrink-0" />
+                  <span className="typography-small truncate">
+                    {selectedIssue ? `Issue #${selectedIssue.number}` : `PR #${selectedPr?.number}`}
+                  </span>
+                  <button
+                    onClick={handleClear}
+                    className="text-muted-foreground hover:text-foreground shrink-0 p-0.5 rounded hover:bg-muted transition-colors"
+                  >
+                    <RiCloseLine className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
 
-            <ScrollableOverlay className="flex-1 px-6 py-4">
-              <div className="space-y-4">
-                {/* Search */}
-                <div className="relative">
-                  <RiSearchLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder={activeTab === 'issues' ? "Search issues or enter #123..." : "Search PRs or enter #456..."}
-                    className="h-9 pl-9"
-                  />
+            {/* Search */}
+            <div className="relative mt-2">
+              <RiSearchLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={activeTab === 'issues' ? "Search issues or enter #123..." : "Search PRs or enter #456..."}
+                className="h-8 pl-9"
+              />
+            </div>
+
+            {/* List Content */}
+            <div className="flex-1 overflow-y-auto mt-2 min-h-0">
+              {/* Loading */}
+              {loading && (
+                <div className="flex items-center justify-center py-8">
+                  <RiLoader4Line className="h-5 w-5 animate-spin text-muted-foreground" />
                 </div>
+              )}
 
-                {/* Loading */}
-                {loading && (
-                  <div className="flex items-center justify-center py-8">
-                    <RiLoader4Line className="h-5 w-5 animate-spin text-muted-foreground" />
-                  </div>
-                )}
+              {/* Error */}
+              {error && (
+                <div className="flex items-center gap-2 p-2 rounded-md bg-destructive/10 text-destructive">
+                  <RiErrorWarningLine className="h-4 w-4" />
+                  <span className="typography-small">{error}</span>
+                </div>
+              )}
 
-                {/* Error */}
-                {error && (
-                  <div className="flex items-center gap-2 p-3 rounded-lg bg-destructive/10 text-destructive">
-                    <RiErrorWarningLine className="h-4 w-4" />
-                    <span className="typography-small">{error}</span>
-                  </div>
-                )}
-
-                {/* Issues List */}
-                {!loading && !error && activeTab === 'issues' && (
-                  <>
-                    <ScrollableOverlay className="max-h-[300px] border border-border/50 rounded-lg">
-                      <div className="p-1 space-y-0.5">
-                        {filteredIssues.length > 0 ? (
-                          filteredIssues.map(issue => (
-                            <button
-                              key={issue.number}
-                              onClick={() => handleSelectIssue(issue)}
-                              className={cn(
-                                'w-full text-left px-3 py-2.5 rounded-md transition-colors',
-                                selectedIssue?.number === issue.number
-                                  ? 'bg-interactive-selection text-interactive-selection-foreground'
-                                  : 'hover:bg-interactive-hover'
-                              )}
-                            >
-                              <div className="flex items-start gap-2">
-                                <span className="text-muted-foreground shrink-0 typography-small">#{issue.number}</span>
-                                <span className="typography-small line-clamp-2">{issue.title}</span>
-                              </div>
-                            </button>
-                          ))
-                        ) : (
-                          <div className="px-3 py-8 text-center typography-small text-muted-foreground">
-                            No issues found
-                          </div>
-                        )}
-                      </div>
-                    </ScrollableOverlay>
-                    {hasMore && !loadingMore && (
-                      <div className="flex justify-center pt-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void loadMore()}
-                        >
-                          Load more
-                        </Button>
-                      </div>
-                    )}
-                    {loadingMore && (
-                      <div className="flex items-center justify-center py-2">
-                        <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {/* PRs List */}
-                {!loading && !error && activeTab === 'prs' && (
-                  <>
-                    <ScrollableOverlay className="max-h-[300px] border border-border/50 rounded-lg">
-                      <div className="p-1 space-y-0.5">
-                        {filteredPrs.length > 0 ? (
-                          filteredPrs.map(pr => {
-                            const blocked = isPrBlocked(pr);
-                            const validation = pr.head ? validations.get(pr.head) : undefined;
-                            
-                            return (
-                              <button
-                                key={pr.number}
-                                onClick={() => !blocked && handleSelectPr(pr)}
-                                disabled={blocked}
-                                className={cn(
-                                  'w-full text-left px-3 py-2.5 rounded-md transition-colors',
-                                  selectedPr?.number === pr.number
-                                    ? 'bg-interactive-selection text-interactive-selection-foreground'
-                                    : blocked
-                                      ? 'opacity-50 cursor-not-allowed'
-                                      : 'hover:bg-interactive-hover'
-                                )}
-                              >
-                                <div className="flex items-start gap-2">
-                                  <span className="text-muted-foreground shrink-0 typography-small">#{pr.number}</span>
-                                  <div className="min-w-0 flex-1">
-                                    <span className="typography-small line-clamp-1">{pr.title}</span>
-                                    <div className="flex items-center gap-2 mt-0.5">
-                                      <span className="typography-micro text-muted-foreground">
-                                        {pr.head} → {pr.base}
-                                      </span>
-                                      {blocked && validation?.error && (
-                                        <span className="typography-micro text-destructive">
-                                          {validation.error}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              </button>
-                            );
-                          })
-                        ) : (
-                          <div className="px-3 py-8 text-center typography-small text-muted-foreground">
-                            No pull requests found
-                          </div>
-                        )}
-                      </div>
-                    </ScrollableOverlay>
-                    {hasMore && !loadingMore && (
-                      <div className="flex justify-center pt-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void loadMore()}
-                        >
-                          Load more
-                        </Button>
-                      </div>
-                    )}
-                    {loadingMore && (
-                      <div className="flex items-center justify-center py-2">
-                        <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {/* Selected Item Preview */}
-                {(selectedIssue || selectedPr) && (
-                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
-                    <div className="flex items-start gap-2">
-                      <RiCheckLine className="h-4 w-4 text-status-success shrink-0 mt-0.5" />
-                      <div className="flex-1 min-w-0">
-                        {selectedIssue && (
-                          <>
-                            <div className="flex items-center gap-2">
-                              <span className="typography-small font-medium">
-                                Issue #{selectedIssue.number}
-                              </span>
-                              <a
-                                href={selectedIssue.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-muted-foreground hover:text-foreground"
-                              >
-                                <RiExternalLinkLine className="h-3 w-3" />
-                              </a>
-                            </div>
-                            <p className="typography-small text-muted-foreground line-clamp-1">
-                              {selectedIssue.title}
-                            </p>
-                            <p className="typography-micro text-muted-foreground mt-1">
-                              Branch will be: issue-{selectedIssue.number}-{'<slug>'}
-                            </p>
-                          </>
-                        )}
-                        {selectedPr && (
-                          <>
-                            <div className="flex items-center gap-2">
-                              <span className="typography-small font-medium">
-                                PR #{selectedPr.number}
-                              </span>
-                              <span className="typography-micro text-muted-foreground">
-                                {selectedPr.head} → {selectedPr.base}
-                              </span>
-                              <a
-                                href={selectedPr.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-muted-foreground hover:text-foreground"
-                              >
-                                <RiExternalLinkLine className="h-3 w-3" />
-                              </a>
-                            </div>
-                            <p className="typography-small text-muted-foreground line-clamp-1">
-                              {selectedPr.title}
-                            </p>
-                            
-                            {/* Include Diff Checkbox */}
-                            <div className="mt-3 pt-3 border-t border-border/30">
-                              <label className="flex items-center gap-2 cursor-pointer">
-                                <Checkbox
-                                  checked={includeDiff}
-                                  onChange={(checked) => setIncludeDiff(checked)}
-                                  ariaLabel="Include PR diff in context"
-                                />
-                                <span className="typography-small text-foreground">
-                                  Include PR diff in session context
-                                </span>
-                              </label>
-                            </div>
-                          </>
-                        )}
-                      </div>
+              {/* Issues List */}
+              {!loading && !error && activeTab === 'issues' && (
+                <div className="space-y-0.5">
+                  {filteredIssues.length > 0 ? (
+                    filteredIssues.map(issue => (
                       <button
-                        onClick={handleClear}
-                        className="text-muted-foreground hover:text-foreground shrink-0"
+                        key={issue.number}
+                        onClick={() => handleSelectIssue(issue)}
+                        className={cn(
+                          'w-full text-left px-2 py-1.5 rounded transition-colors',
+                          selectedIssue?.number === issue.number
+                            ? 'bg-interactive-selection text-interactive-selection-foreground'
+                            : 'hover:bg-interactive-hover'
+                        )}
                       >
-                        <span className="sr-only">Clear selection</span>
-                        ×
+                        <div className="flex items-start gap-2">
+                          <span className="text-muted-foreground shrink-0 typography-micro">#{issue.number}</span>
+                          <span className="typography-small line-clamp-2">{issue.title}</span>
+                        </div>
                       </button>
+                    ))
+                  ) : (
+                    <div className="px-2 py-8 text-center typography-small text-muted-foreground">
+                      No issues found
                     </div>
-                  </div>
+                  )}
+                  
+                  {hasMore && !loadingMore && (
+                    <div className="flex justify-center pt-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void loadMore()}
+                        className="h-7 text-xs"
+                      >
+                        Load more
+                      </Button>
+                    </div>
+                  )}
+                  {loadingMore && (
+                    <div className="flex items-center justify-center py-2">
+                      <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* PRs List */}
+              {!loading && !error && activeTab === 'prs' && (
+                <div className="space-y-0.5">
+                  {filteredPrs.length > 0 ? (
+                    filteredPrs.map(pr => {
+                      const blocked = isPrBlocked(pr);
+                      const validation = pr.head ? validations.get(pr.head) : undefined;
+                      
+                      return (
+                        <button
+                          key={pr.number}
+                          onClick={() => !blocked && handleSelectPr(pr)}
+                          disabled={blocked}
+                          className={cn(
+                            'w-full text-left px-2 py-1.5 rounded transition-colors',
+                            selectedPr?.number === pr.number
+                              ? 'bg-interactive-selection text-interactive-selection-foreground'
+                              : blocked
+                                ? 'opacity-50 cursor-not-allowed'
+                                : 'hover:bg-interactive-hover'
+                          )}
+                        >
+                          <div className="flex items-start gap-2">
+                            <span className="text-muted-foreground shrink-0 typography-micro">#{pr.number}</span>
+                            <div className="min-w-0 flex-1">
+                              <span className="typography-small line-clamp-1">{pr.title}</span>
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <span className="typography-micro text-muted-foreground">
+                                  {pr.head} → {pr.base}
+                                </span>
+                                {blocked && validation?.error && (
+                                  <span className="typography-micro text-destructive">
+                                    {validation.error}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="px-2 py-8 text-center typography-small text-muted-foreground">
+                      No pull requests found
+                    </div>
+                  )}
+                  
+                  {hasMore && !loadingMore && (
+                    <div className="flex justify-center pt-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void loadMore()}
+                        className="h-7 text-xs"
+                      >
+                        Load more
+                      </Button>
+                    </div>
+                  )}
+                  {loadingMore && (
+                    <div className="flex items-center justify-center py-2">
+                      <RiLoader4Line className="h-4 w-4 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer with inline checkbox for PR diff */}
+            <DialogFooter className="mt-1 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                {/* Include Diff Checkbox - only show when PR tab is active and PR is selected */}
+                {activeTab === 'prs' && selectedPr && (
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <Checkbox
+                      checked={includeDiff}
+                      onChange={(checked) => setIncludeDiff(checked)}
+                      ariaLabel="Include PR diff in session context"
+                    />
+                    <span className="typography-small text-foreground">
+                      Include PR diff in session context
+                    </span>
+                  </label>
                 )}
               </div>
-            </ScrollableOverlay>
-
-            {/* Footer */}
-            <DialogFooter className="flex-shrink-0 px-6 py-4 border-t border-border/50">
-              <Button
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={handleConfirm}
-                disabled={!canConfirm}
-              >
-                Select
-              </Button>
+              
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onOpenChange(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleConfirm}
+                  disabled={!canConfirm}
+                >
+                  Select
+                </Button>
+              </div>
             </DialogFooter>
           </>
         )}
