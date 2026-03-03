@@ -832,12 +832,17 @@ const AssistantMessageBody: React.FC<Omit<MessageBodyProps, 'isUser'>> = ({
             try {
                 const originalElement = messageContentRef.current;
                 const computedStyle = window.getComputedStyle(originalElement);
+                const rootStyle = window.getComputedStyle(document.documentElement);
+                const resolvedBackgroundColor =
+                    rootStyle.getPropertyValue('--surface-background').trim() ||
+                    computedStyle.backgroundColor ||
+                    window.getComputedStyle(document.body).backgroundColor;
                 const paddingSize = 24;
 
                 wrapper = document.createElement('div');
                 wrapper.style.cssText = `
                     padding: ${paddingSize}px;
-                    background-color: var(--surface-background);
+                    background-color: ${resolvedBackgroundColor};
                     display: inline-block;
                 `;
 
@@ -848,13 +853,39 @@ const AssistantMessageBody: React.FC<Omit<MessageBodyProps, 'isUser'>> = ({
                     contain: none;
                 `;
 
+                const timestampElements = clone.querySelectorAll<HTMLElement>('[aria-label^="Message time:"]');
+                const footerRowsAdjusted = new Set<HTMLElement>();
+                timestampElements.forEach((element) => {
+                    const label = element.getAttribute('aria-label');
+                    const timestamp = label?.replace('Message time:', '').trim();
+                    if (!timestamp || element.textContent?.includes(timestamp)) {
+                        return;
+                    }
+
+                    const timestampText = document.createElement('span');
+                    timestampText.style.marginLeft = '4px';
+                    timestampText.textContent = timestamp;
+                    element.appendChild(timestampText);
+
+                    const metaGroup = element.parentElement;
+                    const footerRow = metaGroup?.parentElement as HTMLElement | null;
+                    const actionsGroup = footerRow?.firstElementChild as HTMLElement | null;
+                    if (!footerRow || !actionsGroup || actionsGroup === metaGroup || footerRowsAdjusted.has(footerRow)) {
+                        return;
+                    }
+
+                    actionsGroup.style.display = 'none';
+                    footerRow.style.justifyContent = 'flex-start';
+                    footerRowsAdjusted.add(footerRow);
+                });
+
                 wrapper.appendChild(clone);
                 document.body.appendChild(wrapper);
 
                 const dataUrl = await toPng(wrapper, {
                     quality: 1,
                     pixelRatio: 2,
-                    backgroundColor: 'var(--surface-background)',
+                    backgroundColor: resolvedBackgroundColor,
                 });
 
                 const fileName = `message-${messageId}.png`;
