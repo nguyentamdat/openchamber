@@ -11,12 +11,12 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { RiCloseLine, RiFolder6Line, RiSearchLine } from '@remixicon/react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn, truncatePathMiddle } from '@/lib/utils';
-import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { opencodeClient } from '@/lib/opencode/client';
 import { useDeviceInfo } from '@/lib/device';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { useFileSearchStore } from '@/stores/useFileSearchStore';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { useChatSearchDirectory } from '@/hooks/useChatSearchDirectory';
 import { useDirectoryShowHidden } from '@/lib/directoryShowHidden';
 import { useFilesViewShowGitignored } from '@/lib/filesViewShowGitignored';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
@@ -49,7 +49,7 @@ export const ServerFilePicker: React.FC<ServerFilePickerProps> = ({
   const { isMobile } = useDeviceInfo();
   // Only use mobile panels on actual mobile devices, VSCode uses desktop dropdowns
   const isCompact = isMobile;
-  const { currentDirectory } = useDirectoryStore();
+  const currentDirectory = useChatSearchDirectory() ?? '';
   const searchFiles = useFileSearchStore((state) => state.searchFiles);
   const showHidden = useDirectoryShowHidden();
   const showGitignored = useFilesViewShowGitignored();
@@ -218,6 +218,7 @@ export const ServerFilePicker: React.FC<ServerFilePickerProps> = ({
     searchFiles(currentDirectory, normalizedQuery, 150, {
       includeHidden: showHidden,
       respectGitignore: !showGitignored,
+      type: 'file',
     })
       .then((hits) => {
         if (cancelled) {
