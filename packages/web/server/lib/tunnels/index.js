@@ -1,5 +1,6 @@
 import {
   TUNNEL_MODE_QUICK,
+  TUNNEL_PROVIDER_CLOUDFLARE,
   TunnelServiceError,
   normalizeTunnelStartRequest,
   validateTunnelStartRequest,
@@ -22,6 +23,14 @@ export function createTunnelService({
       return null;
     }
     return controller.mode;
+  };
+
+  const resolveActiveProvider = () => {
+    const controller = getController();
+    if (!controller || typeof controller.provider !== 'string') {
+      return null;
+    }
+    return controller.provider;
   };
 
   const stop = () => {
@@ -71,7 +80,12 @@ export function createTunnelService({
     if (!publicUrl) {
       const availability = await provider.checkAvailability();
       if (!availability?.available) {
-        throw new TunnelServiceError('missing_dependency', 'cloudflared is not installed. Install it with: brew install cloudflared');
+        const missingDependencyMessage = typeof availability?.message === 'string' && availability.message.trim().length > 0
+          ? availability.message
+          : (request.provider === TUNNEL_PROVIDER_CLOUDFLARE
+            ? 'cloudflared is not installed. Install it with: brew install cloudflared'
+            : `Required dependency for provider '${request.provider}' is missing`);
+        throw new TunnelServiceError('missing_dependency', missingDependencyMessage);
       }
 
       const activePort = Number.isFinite(getActivePort?.()) ? getActivePort() : null;
@@ -101,6 +115,7 @@ export function createTunnelService({
       request,
       activeMode: request.mode,
       provider: request.provider,
+      providerMetadata: provider.getMetadata?.(getController()) ?? null,
     };
   };
 
@@ -116,11 +131,22 @@ export function createTunnelService({
     return provider.resolvePublicUrl(controller);
   };
 
+  const getProviderMetadata = () => {
+    const controller = getController();
+    if (!controller) {
+      return null;
+    }
+    const provider = registry.get(controller.provider);
+    return provider?.getMetadata?.(controller) ?? null;
+  };
+
   return {
     start,
     stop,
     checkAvailability,
     getPublicUrl,
+    getProviderMetadata,
     resolveActiveMode,
+    resolveActiveProvider,
   };
 }

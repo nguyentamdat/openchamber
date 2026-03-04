@@ -233,7 +233,7 @@ OPTIONS:
   --tunnel-hostname       Managed tunnel hostname
   --tunnel                Shorthand for --tunnel-provider cloudflare --tunnel-mode managed-local
   --try-cf-tunnel         (Deprecated) Create a Cloudflare Quick Tunnel for remote access
-  --tunnel-qr             Display QR code for tunnel URL (use with --try-cf-tunnel)
+  --tunnel-qr             Display QR code for tunnel URL (use with any tunnel startup mode)
   --tunnel-password-url   Include password in tunnel URL for auto-login
   -d, --daemon            Run in background (serve command)
   -h, --help              Show help
@@ -251,6 +251,7 @@ EXAMPLES:
   openchamber serve --daemon     # Start in background
   openchamber --tunnel-provider cloudflare --tunnel-mode quick
   openchamber --tunnel-provider cloudflare --tunnel-mode managed-local --tunnel-config
+  openchamber --tunnel-provider cloudflare --tunnel-mode quick --tunnel-qr
   openchamber --tunnel ~/.cloudflared/config.yml
   openchamber stop               # Stop all running instances
   openchamber stop --port 3000   # Stop specific instance

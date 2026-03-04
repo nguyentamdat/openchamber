@@ -11,6 +11,8 @@ const __dirname = path.dirname(__filename);
 const TRY_CF_URL_REGEX = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 30000;
+const MANAGED_TUNNEL_STARTUP_TIMEOUT_MS = 20000;
+const MANAGED_TUNNEL_LIVENESS_FALLBACK_MS = 6000;
 const TUNNEL_MODE_QUICK = 'quick';
 const TUNNEL_MODE_MANAGED_REMOTE = 'managed-remote';
 const TUNNEL_MODE_MANAGED_LOCAL = 'managed-local';
@@ -122,27 +124,161 @@ const normalizeHostname = (value) => {
   }
 };
 
-const extractHostnameFromCloudflaredConfig = (configPath) => {
-  if (typeof configPath !== 'string' || configPath.trim().length === 0) {
-    return null;
+const READY_LOG_PATTERNS = [
+  /registered tunnel connection/i,
+  /connection[^\n]*registered/i,
+  /starting metrics server/i,
+  /connected to edge/i,
+];
+
+const FATAL_LOG_PATTERNS = [
+  /error parsing.*config/i,
+  /failed to .*config/i,
+  /invalid token/i,
+  /unauthorized/i,
+  /credentials file .* not found/i,
+  /provided tunnel credentials are invalid/i,
+];
+
+function isCloudflaredReadyLogLine(line) {
+  if (!line) {
+    return false;
   }
+  return READY_LOG_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+function isCloudflaredFatalLogLine(line) {
+  if (!line) {
+    return false;
+  }
+  return FATAL_LOG_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+function assertReadableFile(filePath, contextLabel) {
+  let stats;
   try {
-    const raw = fs.readFileSync(configPath, 'utf8');
-    const parsed = yaml.parse(raw);
-    const ingress = Array.isArray(parsed?.ingress) ? parsed.ingress : [];
-    for (const rule of ingress) {
-      const hostname = normalizeHostname(rule?.hostname);
-      if (hostname) {
-        return hostname;
-      }
-    }
+    stats = fs.statSync(filePath);
   } catch {
-    return null;
+    throw new Error(`${contextLabel} not found: ${filePath}`);
   }
-  return null;
+
+  if (!stats.isFile()) {
+    throw new Error(`${contextLabel} is not a file: ${filePath}`);
+  }
+
+  try {
+    fs.accessSync(filePath, fs.constants.R_OK);
+  } catch {
+    throw new Error(`${contextLabel} is not readable: ${filePath}`);
+  }
+}
+
+function extractHostnameFromCloudflaredConfigDetailed(configPath) {
+  if (typeof configPath !== 'string' || configPath.trim().length === 0) {
+    return { hostname: null, parseError: null };
+  }
+
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf8');
+  } catch {
+    return {
+      hostname: null,
+      parseError: new Error(`Managed local tunnel config is not readable: ${configPath}`),
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = yaml.parse(raw);
+  } catch (error) {
+    const reason = typeof error?.message === 'string' ? ` (${error.message})` : '';
+    return {
+      hostname: null,
+      parseError: new Error(`Managed local tunnel config is invalid YAML: ${configPath}${reason}`),
+    };
+  }
+
+  const ingress = Array.isArray(parsed?.ingress) ? parsed.ingress : [];
+  for (const rule of ingress) {
+    const hostname = normalizeHostname(rule?.hostname);
+    if (hostname) {
+      return { hostname, parseError: null };
+    }
+  }
+
+  return { hostname: null, parseError: null };
+}
+
+const extractHostnameFromCloudflaredConfig = (configPath) => {
+  return extractHostnameFromCloudflaredConfigDetailed(configPath).hostname;
 };
 
 const getDefaultCloudflaredConfigPath = () => path.join(os.homedir(), '.cloudflared', 'config.yml');
+
+async function waitForManagedTunnelReady(child, { modeLabel }) {
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    let sawOutput = false;
+
+    const finish = (handler, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(fallbackTimer);
+      clearTimeout(hardTimeout);
+      child.stdout?.off('data', onStdout);
+      child.stderr?.off('data', onStderr);
+      child.off('exit', onExit);
+      handler(value);
+    };
+
+    const inspectChunk = (chunk) => {
+      const text = chunk.toString('utf8');
+      if (text.trim().length > 0) {
+        sawOutput = true;
+      }
+      const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      for (const line of lines) {
+        if (isCloudflaredReadyLogLine(line)) {
+          finish(resolve, null);
+          return;
+        }
+        if (isCloudflaredFatalLogLine(line)) {
+          finish(reject, new Error(`Cloudflared failed to start ${modeLabel}: ${line}`));
+          return;
+        }
+      }
+    };
+
+    const onStdout = (chunk) => {
+      inspectChunk(chunk);
+    };
+
+    const onStderr = (chunk) => {
+      inspectChunk(chunk);
+    };
+
+    const onExit = (code) => {
+      finish(reject, new Error(`Cloudflared exited while starting ${modeLabel} (code ${code ?? 'unknown'})`));
+    };
+
+    child.stdout?.on('data', onStdout);
+    child.stderr?.on('data', onStderr);
+    child.once('exit', onExit);
+
+    const fallbackTimer = setTimeout(() => {
+      if (sawOutput) {
+        finish(resolve, null);
+      }
+    }, MANAGED_TUNNEL_LIVENESS_FALLBACK_MS);
+
+    const hardTimeout = setTimeout(() => {
+      finish(reject, new Error(`Timed out waiting for cloudflared to initialize ${modeLabel}. Check your tunnel config and credentials.`));
+    }, MANAGED_TUNNEL_STARTUP_TIMEOUT_MS);
+  });
+}
 
 export async function startCloudflareQuickTunnel({ originUrl }) {
   const cfCheck = await checkCloudflaredAvailable();
@@ -253,9 +389,6 @@ export async function startCloudflareNamedTunnel({ token, hostname }) {
   const child = spawnCloudflared(['tunnel', 'run', '--token', normalizedToken]);
   const publicUrl = `https://${normalizedHost}`;
 
-  let exitedEarly = false;
-  let earlyExitCode = null;
-
   child.stdout.on('data', () => {
     // Keep stream drained, but avoid logging potentially sensitive output.
   });
@@ -269,22 +402,7 @@ export async function startCloudflareNamedTunnel({ token, hostname }) {
     console.error(`Cloudflared error: ${error.message}`);
   });
 
-  await new Promise((resolve, reject) => {
-    const readyTimer = setTimeout(() => {
-      if (exitedEarly) {
-        reject(new Error(`Cloudflared exited early with code ${earlyExitCode ?? 'unknown'}`));
-      } else {
-        resolve(null);
-      }
-    }, 2000);
-
-    child.once('exit', (code) => {
-      exitedEarly = true;
-      earlyExitCode = code;
-      clearTimeout(readyTimer);
-      reject(new Error(`Cloudflared exited with code ${code ?? 'unknown'}`));
-    });
-  });
+  await waitForManagedTunnelReady(child, { modeLabel: 'managed-remote tunnel' });
 
   return {
     mode: TUNNEL_MODE_MANAGED_REMOTE,
@@ -311,15 +429,21 @@ export async function startCloudflareManagedLocalTunnel({ configPath, hostname }
   const requestedPath = typeof configPath === 'string' ? configPath.trim() : '';
   const effectiveConfigPath = requestedPath || getDefaultCloudflaredConfigPath();
 
-  if (requestedPath && !fs.existsSync(effectiveConfigPath)) {
-    throw new Error(`Managed local tunnel config not found: ${effectiveConfigPath}`);
+  if (requestedPath) {
+    assertReadableFile(effectiveConfigPath, 'Managed local tunnel config');
+  } else {
+    assertReadableFile(effectiveConfigPath, 'Managed local tunnel default config');
   }
 
-  const resolvedHost = normalizeHostname(hostname)
-    || extractHostnameFromCloudflaredConfig(effectiveConfigPath);
+  const configHostnameResult = extractHostnameFromCloudflaredConfigDetailed(effectiveConfigPath);
+  if (configHostnameResult.parseError) {
+    throw configHostnameResult.parseError;
+  }
+
+  const resolvedHost = normalizeHostname(hostname) || configHostnameResult.hostname;
 
   if (!resolvedHost) {
-    throw new Error('Managed local tunnel hostname is required (use --tunnel-hostname or add ingress hostname in config)');
+    throw new Error('Managed local tunnel hostname is required (use --tunnel-hostname or add an ingress hostname to the cloudflared config)');
   }
 
   const args = ['tunnel'];
@@ -330,9 +454,6 @@ export async function startCloudflareManagedLocalTunnel({ configPath, hostname }
 
   const child = spawnCloudflared(args);
   const publicUrl = `https://${resolvedHost}`;
-
-  let exitedEarly = false;
-  let earlyExitCode = null;
 
   child.stdout.on('data', () => {
     // Keep stream drained, but avoid logging potentially sensitive output.
@@ -347,22 +468,7 @@ export async function startCloudflareManagedLocalTunnel({ configPath, hostname }
     console.error(`Cloudflared error: ${error.message}`);
   });
 
-  await new Promise((resolve, reject) => {
-    const readyTimer = setTimeout(() => {
-      if (exitedEarly) {
-        reject(new Error(`Cloudflared exited early with code ${earlyExitCode ?? 'unknown'}`));
-      } else {
-        resolve(null);
-      }
-    }, 2000);
-
-    child.once('exit', (code) => {
-      exitedEarly = true;
-      earlyExitCode = code;
-      clearTimeout(readyTimer);
-      reject(new Error(`Cloudflared exited with code ${code ?? 'unknown'}`));
-    });
-  });
+  await waitForManagedTunnelReady(child, { modeLabel: 'managed-local tunnel' });
 
   return {
     mode: TUNNEL_MODE_MANAGED_LOCAL,

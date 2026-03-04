@@ -59,6 +59,29 @@ describe('tunnel api contract', () => {
     expect(body.code).toBe('provider_unsupported');
   });
 
+  it('returns structured validation for unsupported mode', async () => {
+    process.env.OPENCODE_SKIP_START = 'true';
+    process.env.OPENCODE_HOST = 'http://127.0.0.1:9';
+
+    activeServer = await startWebUiServer({
+      port: 0,
+      attachSignals: false,
+      exitOnShutdown: false,
+    });
+
+    const port = activeServer.getPort();
+    const response = await fetch(`http://127.0.0.1:${port}/api/openchamber/tunnel/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'cloudflare', mode: 'future-mode' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe('mode_unsupported');
+  });
+
   it('accepts legacy mode payload shape without starting provider', async () => {
     process.env.OPENCODE_SKIP_START = 'true';
     process.env.OPENCODE_HOST = 'http://127.0.0.1:9';

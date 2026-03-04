@@ -58,7 +58,7 @@ The whole project was built entirely with AI coding agents under my supervision.
 
 ### Web / PWA
 
-- Cloudflare tunnel access with two modes: Quick Tunnel (CLI) and Named Tunnel (in-app settings)
+- Provider-aware tunnel access model with Cloudflare `quick`, `managed-remote`, and `managed-local` modes
 - One-scan onboarding with tunnel QR + password URL helpers
 - Mobile-first experience: optimized chat controls, keyboard-safe layouts, and attachment-friendly UI
 - Background notifications plus reliable cross-tab session activity tracking
@@ -110,8 +110,8 @@ openchamber --ui-password secret     # Password-protect UI
 openchamber --tunnel-provider cloudflare --tunnel-mode quick  # Create a Cloudflare Quick Tunnel for remote access
 openchamber --tunnel-provider cloudflare --tunnel-mode managed-local --tunnel-config  # Use default ~/.cloudflared/config.yml
 openchamber --tunnel ~/.cloudflared/config.yml   # Shorthand for managed-local with explicit config path
-openchamber --try-cf-tunnel --tunnel-qr              # Show QR code for easy mobile access
-openchamber --try-cf-tunnel --tunnel-password-url   # Include password in URL for auto-login
+openchamber --tunnel-provider cloudflare --tunnel-mode quick --tunnel-qr            # Show QR code for easy mobile access
+openchamber --tunnel-provider cloudflare --tunnel-mode quick --tunnel-password-url   # Include password in URL for auto-login
 OPENCODE_PORT=4096 OPENCODE_SKIP_START=true openchamber                    # Connect to external OpenCode server
 OPENCODE_HOST=https://myhost:4096 OPENCODE_SKIP_START=true openchamber  # Connect via custom host/HTTPS
 openchamber stop                     # Stop server
@@ -158,12 +158,12 @@ environment:
 | `qr`       | Enable tunnel + QR code         |
 | `password` | Enable tunnel + password in URL |
 
-### Named Cloudflare Tunnel (persistent hostname)
+### Managed Cloudflare Tunnel (persistent hostname)
 
-OpenChamber also supports Named Tunnel mode for more reliable long-lived access with your Cloudflare account and custom hostname.
+OpenChamber also supports managed-remote mode for more reliable long-lived access with your Cloudflare account and custom hostname.
 
-- Configure it in-app at **Settings -> OpenChamber -> Tunnel** and switch mode to **Named**.
-- Named tunnels require a domain in your Cloudflare account.
+- Configure it in-app at **Settings -> OpenChamber -> Tunnel** and switch mode to **Named** (legacy UI label for managed-remote).
+- Managed-remote tunnels require a domain in your Cloudflare account.
 - Cloudflare setup guide: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/
 - CLI note: `--tunnel [config.yml]` enables managed-local Cloudflare tunnels.
 

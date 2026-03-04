@@ -29,7 +29,16 @@ export function createCloudflareTunnelProvider() {
   return {
     id: TUNNEL_PROVIDER_CLOUDFLARE,
     capabilities: cloudflareTunnelProviderCapabilities,
-    checkAvailability: async () => checkCloudflaredAvailable(),
+    checkAvailability: async () => {
+      const result = await checkCloudflaredAvailable();
+      if (result.available) {
+        return result;
+      }
+      return {
+        ...result,
+        message: 'cloudflared is not installed. Install it with: brew install cloudflared',
+      };
+    },
     start: async (request, context = {}) => {
       if (request.mode === TUNNEL_MODE_MANAGED_REMOTE) {
         return startCloudflareNamedTunnel({
@@ -58,5 +67,9 @@ export function createCloudflareTunnelProvider() {
       controller?.stop?.();
     },
     resolvePublicUrl: (controller) => controller?.getPublicUrl?.() ?? null,
+    getMetadata: (controller) => ({
+      configPath: controller?.getEffectiveConfigPath?.() ?? null,
+      resolvedHostname: controller?.getResolvedHostname?.() ?? null,
+    }),
   };
 }

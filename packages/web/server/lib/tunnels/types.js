@@ -45,6 +45,26 @@ export function normalizeTunnelMode(value) {
   return TUNNEL_MODE_QUICK;
 }
 
+function normalizeTunnelModeForRequest(value) {
+  if (typeof value !== 'string') {
+    return TUNNEL_MODE_QUICK;
+  }
+  const mode = value.trim().toLowerCase();
+  if (!mode) {
+    return TUNNEL_MODE_QUICK;
+  }
+  if (mode === TUNNEL_MODE_NAMED_LEGACY || mode === TUNNEL_MODE_MANAGED_REMOTE) {
+    return TUNNEL_MODE_MANAGED_REMOTE;
+  }
+  if (mode === TUNNEL_MODE_MANAGED_LOCAL) {
+    return TUNNEL_MODE_MANAGED_LOCAL;
+  }
+  if (mode === TUNNEL_MODE_QUICK) {
+    return TUNNEL_MODE_QUICK;
+  }
+  return mode;
+}
+
 export function normalizeOptionalPath(value) {
   if (value === null) {
     return null;
@@ -75,7 +95,7 @@ export function isSupportedTunnelMode(mode) {
 
 export function normalizeTunnelStartRequest(input = {}, defaults = {}) {
   const provider = normalizeTunnelProvider(input.provider ?? defaults.provider);
-  const mode = normalizeTunnelMode(input.mode ?? defaults.mode);
+  const mode = normalizeTunnelModeForRequest(input.mode ?? defaults.mode);
   const configPathValue = Object.prototype.hasOwnProperty.call(input, 'configPath')
     ? input.configPath
     : defaults.configPath;

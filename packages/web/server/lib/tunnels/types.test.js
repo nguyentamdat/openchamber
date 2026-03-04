@@ -25,6 +25,11 @@ describe('tunnel request types', () => {
     expect(request.hostname).toBe('');
   });
 
+  it('preserves unknown mode in start request for explicit validation', () => {
+    const request = normalizeTunnelStartRequest({ mode: 'future-mode' });
+    expect(request.mode).toBe('future-mode');
+  });
+
   it('requires token and hostname for managed-remote', () => {
     const capabilities = {
       provider: TUNNEL_PROVIDER_CLOUDFLARE,
@@ -37,6 +42,24 @@ describe('tunnel request types', () => {
     expect(() => validateTunnelStartRequest({
       provider: TUNNEL_PROVIDER_CLOUDFLARE,
       mode: TUNNEL_MODE_MANAGED_REMOTE,
+      token: '',
+      hostname: '',
+      configPath: undefined,
+    }, capabilities)).toThrow(TunnelServiceError);
+  });
+
+  it('rejects unsupported mode explicitly', () => {
+    const capabilities = {
+      provider: TUNNEL_PROVIDER_CLOUDFLARE,
+      modes: [TUNNEL_MODE_QUICK, TUNNEL_MODE_MANAGED_REMOTE, TUNNEL_MODE_MANAGED_LOCAL],
+      supportsConfigPath: true,
+      supportsToken: true,
+      supportsHostname: true,
+    };
+
+    expect(() => validateTunnelStartRequest({
+      provider: TUNNEL_PROVIDER_CLOUDFLARE,
+      mode: 'future-mode',
       token: '',
       hostname: '',
       configPath: undefined,
