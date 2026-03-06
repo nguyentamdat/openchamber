@@ -4,8 +4,19 @@ import type { GitHubPullRequestStatus, RuntimeAPIs } from '@/lib/api/types';
 const PR_REVALIDATE_TTL_MS = 90_000;
 const PR_REVALIDATE_INTERVAL_MS = 30_000;
 const PR_DISCOVERY_INTERVAL_MS = 5 * 60_000;
+const PR_BOOTSTRAP_RETRY_DELAYS_MS = [10_000, 30_000] as const;
+const PR_OPEN_BUSY_INTERVAL_MS = 60_000;
+const PR_OPEN_DEFAULT_INTERVAL_MS = 2 * 60_000;
+const PR_OPEN_STABLE_INTERVAL_MS = 5 * 60_000;
 
 const isTerminalPrState = (state: string | null | undefined): boolean => state === 'closed' || state === 'merged';
+const isPendingChecks = (status: GitHubPullRequestStatus | null): boolean => {
+  const checks = status?.checks;
+  if (!checks) {
+    return false;
+  }
+  return checks.state === 'pending' || checks.pending > 0;
+};
 
 export const getGitHubPrStatusKey = (directory: string, branch: string, remoteName?: string | null): string =>
   `${directory}::${branch}::${remoteName ?? ''}`;
@@ -49,6 +60,7 @@ type GitHubPrStatusStore = {
 };
 
 const timers = new Map<string, number>();
+const bootstrapTimers = new Map<string, number[]>();
 const inFlight = new Set<string>();
 
 const createEntry = (): PrStatusEntry => ({
@@ -112,6 +124,28 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>((set, get) => 
       return;
     }
 
+    const runBootstrapRefresh = (delayMs: number) => {
+      const timerId = window.setTimeout(() => {
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+          return;
+        }
+        const entry = get().entries[key];
+        if (!entry || entry.watchers <= 0) {
+          return;
+        }
+        if (entry.status?.pr) {
+          return;
+        }
+        void get().refresh(key, { force: true, silent: true, markInitialResolved: true });
+      }, delayMs);
+      const existing = bootstrapTimers.get(key) ?? [];
+      existing.push(timerId);
+      bootstrapTimers.set(key, existing);
+    };
+
+    void get().refresh(key, { force: true, silent: true, markInitialResolved: true });
+    PR_BOOTSTRAP_RETRY_DELAYS_MS.forEach((delay) => runBootstrapRefresh(delay));
+
     const timerId = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
@@ -151,6 +185,16 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>((set, get) => 
         return;
       }
 
+      const elapsed = Date.now() - entry.lastRefreshAt;
+      const nextInterval = isPendingChecks(entry.status)
+        ? PR_OPEN_BUSY_INTERVAL_MS
+        : (entry.status?.checks && entry.status.checks.state !== 'pending'
+            ? PR_OPEN_STABLE_INTERVAL_MS
+            : PR_OPEN_DEFAULT_INTERVAL_MS);
+      if (elapsed < nextInterval) {
+        return;
+      }
+
       void get().refresh(key, { force: true, onlyExistingPr: true, silent: true, markInitialResolved: true });
     }, PR_REVALIDATE_INTERVAL_MS);
 
@@ -186,6 +230,14 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>((set, get) => 
       window.clearInterval(timerId);
     }
     timers.delete(key);
+
+    const pendingBootstrapTimers = bootstrapTimers.get(key);
+    if (pendingBootstrapTimers && pendingBootstrapTimers.length > 0) {
+      pendingBootstrapTimers.forEach((id) => {
+        window.clearTimeout(id);
+      });
+    }
+    bootstrapTimers.delete(key);
   },
 
   refresh: async (key, options) => {

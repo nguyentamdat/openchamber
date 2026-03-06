@@ -10,6 +10,7 @@ import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useConfigStore } from '@/stores/useConfigStore';
+import type { GitHubPullRequestStatus } from '@/lib/api/types';
 import { getSafeStorage } from '@/stores/utils/safeStorage';
 import { createWorktreeSession } from '@/lib/worktreeSessionCreator';
 import { useGitStore } from '@/stores/useGitStore';
@@ -33,6 +34,7 @@ import { useProjectRepoStatus } from './sidebar/hooks/useProjectRepoStatus';
 import { useProjectSessionLists } from './sidebar/hooks/useProjectSessionLists';
 import { useSessionFolderCleanup } from './sidebar/hooks/useSessionFolderCleanup';
 import { useStickyProjectHeaders } from './sidebar/hooks/useStickyProjectHeaders';
+import { useGitHubPrStatusStore } from '@/stores/useGitHubPrStatusStore';
 import { SessionGroupSection } from './sidebar/SessionGroupSection';
 import { SidebarHeader } from './sidebar/SidebarHeader';
 import { SidebarProjectsList } from './sidebar/SidebarProjectsList';
@@ -56,6 +58,55 @@ const GROUP_COLLAPSE_STORAGE_KEY = 'oc.sessions.groupCollapse';
 const PROJECT_ACTIVE_SESSION_STORAGE_KEY = 'oc.sessions.activeSessionByProject';
 const SESSION_EXPANDED_STORAGE_KEY = 'oc.sessions.expandedParents';
 const SESSION_PINNED_STORAGE_KEY = 'oc.sessions.pinned';
+
+type PrVisualState = 'draft' | 'open' | 'blocked' | 'merged' | 'closed';
+
+type PrIndicator = {
+  visualState: PrVisualState;
+  number: number;
+  url: string | null;
+  state: 'open' | 'closed' | 'merged';
+  draft: boolean;
+};
+
+const getPrVisualState = (status: GitHubPullRequestStatus | null): PrVisualState | null => {
+  const pr = status?.pr;
+  if (!pr) {
+    return null;
+  }
+  if (pr.state === 'merged') {
+    return 'merged';
+  }
+  if (pr.state === 'closed') {
+    return 'closed';
+  }
+  if (pr.draft) {
+    return 'draft';
+  }
+  const checksFailed = status?.checks?.state === 'failure';
+  const notMergeable = status?.canMerge === false || pr.mergeable === false;
+  if (checksFailed || notMergeable) {
+    return 'blocked';
+  }
+  return 'open';
+};
+
+const getPrVisualPriority = (state: PrVisualState): number => {
+  switch (state) {
+    case 'open':
+      return 5;
+    case 'blocked':
+      return 4;
+    case 'draft':
+      return 3;
+    case 'merged':
+      return 2;
+    case 'closed':
+      return 1;
+    default:
+      return 0;
+  }
+};
 
 interface SessionSidebarProps {
   mobileVariant?: boolean;
@@ -235,6 +286,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const availableWorktreesByProject = useSessionStore((state) => state.availableWorktreesByProject);
   const getSessionsByDirectory = useSessionStore((state) => state.getSessionsByDirectory);
   const openNewSessionDraft = useSessionStore((state) => state.openNewSessionDraft);
+  const prStatusEntries = useGitHubPrStatusStore((state) => state.entries);
 
   const tauriIpcAvailable = React.useMemo(() => isTauriShell(), []);
   const isDesktopShellRuntime = React.useMemo(() => isDesktopShell(), []);
@@ -775,6 +827,38 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     });
   }, []);
 
+  const prVisualStateByDirectoryBranch = React.useMemo(() => {
+    const result = new Map<string, PrIndicator>();
+
+    Object.values(prStatusEntries).forEach((entry) => {
+      const directory = normalizePath(entry.params?.directory ?? null);
+      const branch = entry.params?.branch?.trim();
+      if (!directory || !branch) {
+        return;
+      }
+      const state = getPrVisualState(entry.status ?? null);
+      const pr = entry.status?.pr;
+      if (!state || !pr?.number) {
+        return;
+      }
+
+      const key = `${directory}::${branch}`;
+      const nextIndicator: PrIndicator = {
+        visualState: state,
+        number: pr.number,
+        url: typeof pr.url === 'string' && pr.url.trim().length > 0 ? pr.url : null,
+        state: pr.state,
+        draft: Boolean(pr.draft),
+      };
+      const existing = result.get(key);
+      if (!existing || getPrVisualPriority(nextIndicator.visualState) > getPrVisualPriority(existing.visualState)) {
+        result.set(key, nextIndicator);
+      }
+    });
+
+    return result;
+  }, [prStatusEntries]);
+
   const renderGroupSessions = React.useCallback(
     (group: SessionGroup, groupKey: string, projectId?: string | null, hideGroupLabel?: boolean) => (
       <SessionGroupSection
@@ -813,6 +897,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         setRenameFolderDraft={setRenameFolderDraft}
         setRenamingFolderId={setRenamingFolderId}
         pinnedSessionIds={pinnedSessionIds}
+        prVisualStateByDirectoryBranch={prVisualStateByDirectoryBranch}
         onToggleCollapsedGroup={toggleCollapsedGroup}
       />
     ),
@@ -844,6 +929,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       renamingFolderId,
       renameFolderDraft,
       pinnedSessionIds,
+      prVisualStateByDirectoryBranch,
       toggleCollapsedGroup,
     ],
   );

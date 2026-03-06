@@ -62,6 +62,13 @@ type Props = {
   setRenameFolderDraft: React.Dispatch<React.SetStateAction<string>>;
   setRenamingFolderId: React.Dispatch<React.SetStateAction<string | null>>;
   pinnedSessionIds: Set<string>;
+  prVisualStateByDirectoryBranch: Map<string, {
+    visualState: 'draft' | 'open' | 'blocked' | 'merged' | 'closed';
+    number: number;
+    url: string | null;
+    state: 'open' | 'closed' | 'merged';
+    draft: boolean;
+  }>;
   onToggleCollapsedGroup: (groupKey: string) => void;
 };
 
@@ -102,6 +109,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
     setRenameFolderDraft,
     setRenamingFolderId,
     pinnedSessionIds,
+    prVisualStateByDirectoryBranch,
     onToggleCollapsedGroup,
   } = props;
 
@@ -183,12 +191,36 @@ export function SessionGroupSection(props: Props): React.ReactNode {
   const isGitProject = projectId && projectRepoStatus.has(projectId)
     ? Boolean(projectRepoStatus.get(projectId))
     : lastRepoStatus;
-  const showBranchSubtitle = !group.isMain && isBranchDifferentFromLabel(group.branch, group.label);
   const isActiveGroup = Boolean(
     normalizedGroupDirectory
       && currentSessionDirectory
       && normalizedGroupDirectory === currentSessionDirectory,
   );
+  const groupDirectoryKey = normalizePath(group.directory ?? null);
+  const groupBranchKey = group.branch?.trim() ?? null;
+  const prIndicator = groupDirectoryKey && groupBranchKey
+    ? (prVisualStateByDirectoryBranch.get(`${groupDirectoryKey}::${groupBranchKey}`) ?? null)
+    : null;
+  const showInlinePrTitle = Boolean(prIndicator && group.branch);
+  const showBranchSubtitle = !group.isMain && (isBranchDifferentFromLabel(group.branch, group.label) || Boolean(prIndicator));
+  const prVisualState = prIndicator?.visualState ?? null;
+  const branchIconColor = prVisualState ? `var(--pr-${prVisualState})` : undefined;
+  const handlePrLinkClick = (event: React.MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const url = prIndicator?.url;
+    if (!url || typeof window === 'undefined') {
+      return;
+    }
+    const tauri = (window as unknown as { __TAURI__?: { shell?: { open?: (target: string) => Promise<unknown> } } }).__TAURI__;
+    if (tauri?.shell?.open) {
+      void tauri.shell.open(url).catch(() => {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      });
+      return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
 
   const renderOneFolderItem = (folder: SessionFolder, nodes: SessionNode[], depth: number): React.ReactNode => {
     const directSubFolders = allFoldersForGroup.filter(({ folder: f }) => f.parentId === folder.id);
@@ -330,14 +362,55 @@ export function SessionGroupSection(props: Props): React.ReactNode {
           {group.isArchivedBucket ? (
             <RiArchiveLine className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
           ) : (!group.isMain || isGitProject) ? (
-            <RiGitBranchLine className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+            <RiGitBranchLine
+              className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground"
+              style={branchIconColor ? { color: branchIconColor } : undefined}
+            />
           ) : null}
           <div className="min-w-0 flex flex-col justify-center">
             <p className={cn('text-[14px] font-semibold truncate', isActiveGroup ? 'text-primary' : 'text-muted-foreground')}>
-              {renderHighlightedText(group.label, normalizedSessionSearchQuery)}
+              {showInlinePrTitle && prIndicator ? (
+                <>
+                  {prIndicator.url ? (
+                    <button
+                      type="button"
+                      className="underline hover:no-underline"
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={handlePrLinkClick}
+                    >
+                      #{prIndicator.number}
+                    </button>
+                  ) : (
+                    <span>#{prIndicator.number}</span>
+                  )}
+                  <span>{` ${group.branch}`}</span>
+                </>
+              ) : (
+                renderHighlightedText(group.label, normalizedSessionSearchQuery)
+              )}
             </p>
-            {showBranchSubtitle ? (
-              <span className="text-[10px] sm:text-[11px] text-muted-foreground/80 truncate leading-tight">{group.branch}</span>
+            {!showInlinePrTitle && showBranchSubtitle ? (
+              <span className="text-[10px] sm:text-[11px] text-muted-foreground/80 truncate leading-tight">
+                {prIndicator ? (
+                  <>
+                    {prIndicator.url ? (
+                      <button
+                        type="button"
+                        className="underline hover:no-underline"
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={handlePrLinkClick}
+                      >
+                        #{prIndicator.number}
+                      </button>
+                    ) : (
+                      <span>#{prIndicator.number}</span>
+                    )}
+                    {group.branch ? <span>{` ${group.branch}`}</span> : null}
+                  </>
+                ) : (
+                  group.branch
+                )}
+              </span>
             ) : null}
           </div>
           {isCollapsed ? (

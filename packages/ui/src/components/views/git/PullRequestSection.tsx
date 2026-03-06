@@ -1063,12 +1063,21 @@ export const PullRequestSection: React.FC<{
   }, [prStatusKey, refresh]);
 
   React.useEffect(() => {
+    const isTerminal = status?.pr?.state === 'closed' || status?.pr?.state === 'merged';
+    const lastRefreshAt = statusEntry?.lastRefreshAt ?? 0;
+    const isStale = Date.now() - lastRefreshAt > 60_000;
+    const shouldRefresh = !isTerminal && isStale;
+
     const onFocus = () => {
-      void refresh({ force: true, silent: true });
+      if (shouldRefresh) {
+        void refresh({ force: true, silent: true });
+      }
     };
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        void refresh({ force: true, silent: true });
+        if (shouldRefresh) {
+          void refresh({ force: true, silent: true });
+        }
       }
     };
 
@@ -1078,7 +1087,7 @@ export const PullRequestSection: React.FC<{
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [refresh]);
+  }, [refresh, status?.pr?.state, statusEntry?.lastRefreshAt]);
 
   React.useEffect(() => {
     if (githubAuthChecked && githubAuthStatus?.connected === false) {
