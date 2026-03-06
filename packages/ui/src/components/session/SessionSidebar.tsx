@@ -847,8 +847,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     const result = new Map<string, PrIndicator>();
 
     Object.values(prStatusEntries).forEach((entry) => {
-      const directory = normalizePath(entry.params?.directory ?? null);
-      const branch = entry.params?.branch?.trim();
+      const directory = normalizePath(entry.params?.directory ?? entry.identity?.directory ?? null);
+      const branch = entry.params?.branch?.trim() ?? entry.identity?.branch?.trim();
       if (!directory || !branch) {
         return;
       }
