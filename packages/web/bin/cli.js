@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import path from 'path';
 import fs from 'fs';
 import net from 'net';
 import os from 'os';
+import path from 'path';
+import crypto from 'crypto';
 import { spawn, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { cloudflareTunnelProviderCapabilities } from '../server/lib/tunnels/providers/cloudflare.js';
@@ -12,7 +13,60 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_PORT = 3000;
+const DEFAULT_TAIL_LINES = 200;
+const LOG_ROTATE_MAX_BYTES = 10 * 1024 * 1024;
+const LOG_ROTATE_KEEP = 5;
+const TUNNEL_PROFILES_VERSION = 1;
+const TUNNEL_PROFILES_FILE_NAME = 'tunnel-profiles.json';
+const LEGACY_CLOUDFLARE_MANAGED_REMOTE_FILE_NAME = 'cloudflare-managed-remote-tunnels.json';
 const PACKAGE_JSON = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+const DEFAULT_TUNNEL_PROVIDER_CAPABILITIES = [cloudflareTunnelProviderCapabilities];
+
+const STYLE_ENABLED = process.stdout.isTTY && process.env.NO_COLOR !== '1';
+const ANSI = {
+  reset: '\x1b[0m',
+  dim: '\x1b[90m',
+  info: '\x1b[94m',
+  success: '\x1b[92m',
+  warning: '\x1b[93m',
+  error: '\x1b[91m',
+};
+
+const STATUS_SYMBOL = {
+  success: '✓',
+  neutral: '○',
+  warning: '⚠',
+  error: '✗',
+};
+
+function color(text, tone = 'reset') {
+  if (!STYLE_ENABLED) return text;
+  const start = ANSI[tone] || ANSI.reset;
+  return `${start}${text}${ANSI.reset}`;
+}
+
+function printSectionStart(title) {
+  console.log(`┌  ${title}`);
+  console.log('│');
+}
+
+function printSectionEnd(text) {
+  console.log(`└  ${text}`);
+}
+
+function printListItem({ status = 'neutral', line, detail }) {
+  const symbol = STATUS_SYMBOL[status] || STATUS_SYMBOL.neutral;
+  const tone = status === 'success' ? 'success' : status === 'warning' ? 'warning' : status === 'error' ? 'error' : 'info';
+  console.log(`${color('●', tone)}  ${color(symbol, tone)} ${line}`);
+  if (detail) {
+    console.log(`│      ${color(detail, 'dim')}`);
+  }
+  console.log('│');
+}
+
+function importFromFilePath(filePath) {
+  return import(pathToFileURL(filePath).href);
+}
 
 function getBunBinary() {
   if (typeof process.env.BUN_BINARY === 'string' && process.env.BUN_BINARY.trim().length > 0) {
@@ -25,11 +79,6 @@ function getBunBinary() {
 }
 
 const BUN_BIN = getBunBinary();
-const DEFAULT_TUNNEL_PROVIDER_CAPABILITIES = [cloudflareTunnelProviderCapabilities];
-
-function importFromFilePath(filePath) {
-  return import(pathToFileURL(filePath).href);
-}
 
 function isBunRuntime() {
   return typeof globalThis.Bun !== 'undefined';
@@ -48,16 +97,6 @@ function getPreferredServerRuntime() {
   return isBunInstalled() ? 'bun' : 'node';
 }
 
-function generateRandomPassword(length = 16) {
-  const charset = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
-  let password = '';
-  for (let i = 0; i < length; i++) {
-    const randomIndex = Math.floor(Math.random() * charset.length);
-    password += charset[randomIndex];
-  }
-  return password;
-}
-
 async function displayTunnelQrCode(url) {
   try {
     const qrcode = await import('qrcode-terminal');
@@ -65,151 +104,209 @@ async function displayTunnelQrCode(url) {
     qrcode.default.generate(url, { small: true });
     console.log('');
   } catch (error) {
-    console.warn('⚠️  Could not generate QR code:', error.message);
+    console.warn(`Warning: Could not generate QR code: ${error.message}`);
   }
 }
 
-function buildTunnelUrl(baseUrl, password, includePassword) {
-  if (!includePassword || !password) {
-    return baseUrl;
+function splitOptionToken(arg) {
+  if (!arg.startsWith('-')) return null;
+  if (arg.startsWith('--')) {
+    const eqIndex = arg.indexOf('=');
+    return {
+      name: eqIndex >= 0 ? arg.slice(2, eqIndex) : arg.slice(2),
+      inlineValue: eqIndex >= 0 ? arg.slice(eqIndex + 1) : undefined,
+      long: true,
+    };
   }
-  const url = new URL(baseUrl);
-  url.searchParams.set('token', password);
-  return url.toString();
+  return {
+    name: arg.slice(1),
+    inlineValue: undefined,
+    long: false,
+  };
 }
 
 function parseArgs(argv = process.argv.slice(2)) {
   const args = Array.isArray(argv) ? [...argv] : [];
-  const envPassword = process.env.OPENCHAMBER_UI_PASSWORD || undefined;
   const options = {
     port: DEFAULT_PORT,
-    daemon: false,
-    uiPassword: envPassword,
-    tryCfTunnel: false,
-    tunnelQr: false,
-    tunnelPasswordUrl: false,
-    tunnelProvider: undefined,
-    tunnelMode: undefined,
-    tunnelConfigPath: undefined,
-    tunnelToken: undefined,
-    tunnelHostname: undefined,
+    uiPassword: process.env.OPENCHAMBER_UI_PASSWORD || undefined,
+    json: false,
+    all: false,
+    follow: true,
+    lines: DEFAULT_TAIL_LINES,
+    provider: undefined,
+    mode: undefined,
+    profile: undefined,
+    name: undefined,
+    configPath: undefined,
+    token: undefined,
+    hostname: undefined,
+    qr: false,
+    force: false,
+    explicitPort: false,
+    explicitUiPassword: false,
   };
-  const warnings = [];
-  let command = 'serve';
 
-  const consumeValue = (currentIndex, inlineValue) => {
+  const removedFlagErrors = [];
+  const positional = [];
+  let helpRequested = false;
+  let versionRequested = false;
+
+  const consumeValue = (index, inlineValue) => {
     if (typeof inlineValue === 'string' && inlineValue.length > 0) {
-      return { value: inlineValue, nextIndex: currentIndex };
+      return { value: inlineValue, nextIndex: index };
     }
-    const candidate = args[currentIndex + 1];
+    const candidate = args[index + 1];
     if (typeof candidate === 'string' && !candidate.startsWith('-')) {
-      return { value: candidate, nextIndex: currentIndex + 1 };
+      return { value: candidate, nextIndex: index + 1 };
     }
-    return { value: undefined, nextIndex: currentIndex };
+    return { value: undefined, nextIndex: index };
   };
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    const parsedToken = splitOptionToken(arg);
+    if (!parsedToken) {
+      positional.push(arg);
+      continue;
+    }
 
-    if (arg.startsWith('-')) {
-      let optionName;
-      let inlineValue;
-
-      if (arg.startsWith('--')) {
-        const eqIndex = arg.indexOf('=');
-        optionName = eqIndex >= 0 ? arg.slice(2, eqIndex) : arg.slice(2);
-        inlineValue = eqIndex >= 0 ? arg.slice(eqIndex + 1) : undefined;
-      } else {
-        optionName = arg.slice(1);
-        inlineValue = undefined;
+    const { name, inlineValue, long } = parsedToken;
+    switch (name) {
+      case 'port':
+      case 'p': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        const parsed = parseInt(value ?? '', 10);
+        options.port = Number.isFinite(parsed) ? parsed : DEFAULT_PORT;
+        options.explicitPort = true;
+        break;
       }
-
-      switch (optionName) {
-        case 'port':
-        case 'p': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          const parsed = parseInt(value ?? '', 10);
-          options.port = Number.isFinite(parsed) ? parsed : DEFAULT_PORT;
-          break;
-        }
-        case 'daemon':
-        case 'd':
-          options.daemon = true;
-          break;
-        case 'try-cf-tunnel':
-          options.tryCfTunnel = true;
-          if (!warnings.includes('`--try-cf-tunnel` is deprecated; use `--tunnel-provider cloudflare --tunnel-mode quick`')) {
-            warnings.push('`--try-cf-tunnel` is deprecated; use `--tunnel-provider cloudflare --tunnel-mode quick`');
-          }
-          break;
-        case 'tunnel': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          options.tunnelProvider = 'cloudflare';
-          options.tunnelMode = 'managed-local';
-          options.tunnelConfigPath = typeof value === 'string' ? value : null;
-          break;
-        }
-        case 'tunnel-provider': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          options.tunnelProvider = typeof value === 'string' ? value : options.tunnelProvider;
-          break;
-        }
-        case 'tunnel-mode': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          options.tunnelMode = typeof value === 'string' ? value : options.tunnelMode;
-          break;
-        }
-        case 'tunnel-config': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          options.tunnelConfigPath = typeof value === 'string' ? value : null;
-          break;
-        }
-        case 'tunnel-token': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          options.tunnelToken = typeof value === 'string' ? value : options.tunnelToken;
-          break;
-        }
-        case 'tunnel-hostname': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          options.tunnelHostname = typeof value === 'string' ? value : options.tunnelHostname;
-          break;
-        }
-        case 'tunnel-qr':
-          options.tunnelQr = true;
-          break;
-        case 'tunnel-password-url':
-          options.tunnelPasswordUrl = true;
-          break;
-        case 'ui-password': {
-          const { value, nextIndex } = consumeValue(i, inlineValue);
-          i = nextIndex;
-          options.uiPassword = typeof value === 'string' ? value : '';
-          break;
-        }
-        case 'help':
-        case 'h':
-          showHelp();
-          process.exit(0);
-          break;
-        case 'version':
-        case 'v':
-          console.log(PACKAGE_JSON.version);
-          process.exit(0);
-          break;
+      case 'ui-password': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.uiPassword = typeof value === 'string' ? value : '';
+        options.explicitUiPassword = true;
+        break;
       }
-    } else {
-      command = arg;
+      case 'provider': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.provider = typeof value === 'string' ? value : options.provider;
+        break;
+      }
+      case 'mode': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.mode = typeof value === 'string' ? value : options.mode;
+        break;
+      }
+      case 'profile': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.profile = typeof value === 'string' ? value : options.profile;
+        break;
+      }
+      case 'name': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.name = typeof value === 'string' ? value : options.name;
+        break;
+      }
+      case 'config': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.configPath = typeof value === 'string' ? value : null;
+        break;
+      }
+      case 'token': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.token = typeof value === 'string' ? value : options.token;
+        break;
+      }
+      case 'hostname': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        options.hostname = typeof value === 'string' ? value : options.hostname;
+        break;
+      }
+      case 'json':
+        options.json = true;
+        break;
+      case 'all':
+        options.all = true;
+        break;
+      case 'no-follow':
+        options.follow = false;
+        break;
+      case 'lines': {
+        const { value, nextIndex } = consumeValue(i, inlineValue);
+        i = nextIndex;
+        const parsed = parseInt(value ?? '', 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          options.lines = parsed;
+        }
+        break;
+      }
+      case 'qr':
+        options.qr = true;
+        break;
+      case 'force':
+        options.force = true;
+        break;
+      case 'help':
+      case 'h':
+        helpRequested = true;
+        break;
+      case 'version':
+      case 'v':
+        versionRequested = true;
+        break;
+      case 'daemon':
+      case 'd':
+        removedFlagErrors.push('`--daemon` was removed. OpenChamber now always runs in daemon mode.');
+        break;
+      case 'try-cf-tunnel':
+        removedFlagErrors.push('`--try-cf-tunnel` was removed. Use: openchamber tunnel start --provider cloudflare --mode quick');
+        break;
+      case 'tunnel-qr':
+        removedFlagErrors.push('`--tunnel-qr` was removed. Use: openchamber tunnel start ... --qr');
+        break;
+      case 'tunnel-password-url':
+        removedFlagErrors.push('`--tunnel-password-url` was removed. Use UI password auth directly after tunnel start.');
+        break;
+      case 'tunnel-provider':
+      case 'tunnel-mode':
+      case 'tunnel-config':
+      case 'tunnel-token':
+      case 'tunnel-hostname':
+      case 'tunnel':
+        removedFlagErrors.push(`\`--${name}\` was removed from top-level serve flow. Use: openchamber tunnel start ...`);
+        break;
+      default:
+        if (!long && name.length === 1) {
+          removedFlagErrors.push(`Unknown option: -${name}`);
+        } else {
+          removedFlagErrors.push(`Unknown option: --${name}`);
+        }
+        break;
     }
   }
 
-  return { command, options, warnings };
+  const command = positional[0] || 'serve';
+  const subcommand = command === 'tunnel' ? (positional[1] || 'help') : null;
+  const tunnelAction = command === 'tunnel' ? (positional[2] || null) : null;
+
+  return {
+    command,
+    subcommand,
+    tunnelAction,
+    options,
+    removedFlagErrors,
+    helpRequested,
+    versionRequested,
+  };
 }
 
 function showHelp() {
@@ -220,115 +317,315 @@ USAGE:
   openchamber [COMMAND] [OPTIONS]
 
 COMMANDS:
-  serve          Start the web server (default)
+  serve          Start the web server (daemon default)
   stop           Stop running instance(s)
   restart        Stop and start the server
   status         Show server status
-  tunnel-providers  Show tunnel provider capabilities
+  tunnel         Tunnel lifecycle commands
+  logs           Tail OpenChamber logs
   update         Check for and install updates
 
 OPTIONS:
   -p, --port              Web server port (default: ${DEFAULT_PORT})
   --ui-password           Protect browser UI with single password
-  --tunnel-provider       Tunnel provider (default: cloudflare)
-  --tunnel-mode           Tunnel mode: quick | managed-remote | managed-local
-  --tunnel-config         Managed-local config path (optional; default cloudflared config when omitted)
-  --tunnel-token          Managed-remote token
-  --tunnel-hostname       Managed tunnel hostname
-  --tunnel                Shorthand for --tunnel-provider cloudflare --tunnel-mode managed-local
-  --try-cf-tunnel         (Deprecated) Create a Cloudflare Quick Tunnel for remote access
-  --tunnel-qr             Display QR code for tunnel URL (use with any tunnel startup mode)
-  --tunnel-password-url   Include password in tunnel URL for auto-login
-  -d, --daemon            Run in background (serve command)
   -h, --help              Show help
   -v, --version           Show version
 
 ENVIRONMENT:
   OPENCHAMBER_UI_PASSWORD      Alternative to --ui-password flag
-  OPENCODE_HOST               External OpenCode server base URL, e.g. http://hostname:4096 (overrides OPENCODE_PORT)
+  OPENCHAMBER_DATA_DIR         Override OpenChamber data directory
+  OPENCODE_HOST               External OpenCode server base URL, e.g. http://hostname:4096
   OPENCODE_PORT               Port of external OpenCode server to connect to
   OPENCODE_SKIP_START          Skip starting OpenCode, use external server
 
 EXAMPLES:
-  openchamber                    # Start on default port 3000 (or a free port)
-  openchamber --port 8080        # Start on port 8080
-  openchamber serve --daemon     # Start in background
-  openchamber --tunnel-provider cloudflare --tunnel-mode quick
-  openchamber --tunnel-provider cloudflare --tunnel-mode managed-local --tunnel-config
-  openchamber --tunnel-provider cloudflare --tunnel-mode quick --tunnel-qr
-  openchamber --tunnel ~/.cloudflared/config.yml
-  openchamber stop               # Stop all running instances
-  openchamber stop --port 3000   # Stop specific instance
-  openchamber status             # Check status
-  openchamber tunnel-providers   # Print tunnel provider capability descriptors
-  openchamber update             # Update to latest version
+  openchamber                    # Start in daemon mode on default port 3000 (or free port)
+  openchamber --port 8080        # Start on port 8080 (daemon)
+  openchamber tunnel help        # Show tunnel lifecycle help
+  openchamber logs               # Follow logs for latest running instance
 `);
 }
 
-function listRunningInstancePorts() {
-  const ports = [];
+function showTunnelHelp() {
+  console.log(`
+ Tunnel Lifecycle Commands
+
+USAGE:
+  openchamber tunnel <SUBCOMMAND> [OPTIONS]
+
+SUBCOMMANDS:
+  help        Show this tunnel help
+  providers   Show available tunnel providers and capabilities
+  check       Check tunnel dependencies for a provider
+  status      Show tunnel status
+  start       Start a tunnel
+  stop        Stop active tunnel (keep server running)
+  profile     Manage saved managed-remote profiles
+
+COMMON OPTIONS:
+  -p, --port              Target OpenChamber instance port
+  --json                  Output machine-readable JSON
+  --all                   Apply to all running instances (status/stop)
+
+START OPTIONS:
+  --provider <id>         Tunnel provider id (required)
+  --mode <id>             Tunnel mode (required)
+  --profile <name>        Start tunnel from saved profile name
+  --config [path]         Managed-local config path (optional)
+  --token <token>         Managed-remote token
+  --hostname <hostname>   Managed-remote hostname
+  --qr                    Print QR code for resulting tunnel URL
+
+PROFILE USAGE:
+  openchamber tunnel profile list [--provider <id>] [--json]
+  openchamber tunnel profile show --name <name> [--provider <id>] [--json]
+  openchamber tunnel profile add --provider <id> --mode managed-remote --name <name> --hostname <host> --token <token> [--force] [--json]
+  openchamber tunnel profile remove --name <name> [--provider <id>] [--json]
+
+EXAMPLES:
+  openchamber tunnel providers
+  openchamber tunnel check --provider cloudflare
+  openchamber tunnel status --all
+  openchamber tunnel start --provider cloudflare --mode quick --qr
+  openchamber tunnel start --profile prod-main
+  openchamber tunnel start --provider cloudflare --mode managed-remote --token <token> --hostname app.example.com
+  openchamber tunnel start --provider cloudflare --mode managed-local --config ~/.cloudflared/config.yml
+  openchamber tunnel profile add --provider cloudflare --mode managed-remote --name prod-main --hostname app.example.com --token <token>
+  openchamber tunnel profile list --provider cloudflare
+  openchamber tunnel stop --port 3000
+`);
+}
+
+function getDataDir() {
+  if (typeof process.env.OPENCHAMBER_DATA_DIR === 'string' && process.env.OPENCHAMBER_DATA_DIR.trim().length > 0) {
+    return path.resolve(process.env.OPENCHAMBER_DATA_DIR.trim());
+  }
+  return path.join(os.homedir(), '.config', 'openchamber');
+}
+
+function getLogsDir() {
+  return path.join(getDataDir(), 'logs');
+}
+
+function ensureLogsDir() {
+  fs.mkdirSync(getLogsDir(), { recursive: true });
+}
+
+function getLogFilePath(port) {
+  return path.join(getLogsDir(), `openchamber-${port}.log`);
+}
+
+function getTunnelProfilesFilePath() {
+  return path.join(getDataDir(), TUNNEL_PROFILES_FILE_NAME);
+}
+
+function getLegacyCloudflareManagedRemoteFilePath() {
+  return path.join(getDataDir(), LEGACY_CLOUDFLARE_MANAGED_REMOTE_FILE_NAME);
+}
+
+function normalizeProfileProvider(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+}
+
+function normalizeProfileMode(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+}
+
+function normalizeProfileName(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+}
+
+function normalizeProfileHostname(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+}
+
+function normalizeProfileToken(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+}
+
+function maskToken(token) {
+  if (typeof token !== 'string' || token.length === 0) {
+    return '***';
+  }
+  if (token.length <= 4) {
+    return '*'.repeat(token.length);
+  }
+  return `${'*'.repeat(Math.max(4, token.length - 4))}${token.slice(-4)}`;
+}
+
+function sanitizeTunnelProfilesData(data) {
+  const parsed = data && typeof data === 'object' ? data : {};
+  const list = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+  const seen = new Set();
+  const profiles = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue;
+    const id = typeof entry.id === 'string' && entry.id.trim().length > 0 ? entry.id.trim() : crypto.randomUUID();
+    const provider = normalizeProfileProvider(entry.provider);
+    const mode = normalizeProfileMode(entry.mode);
+    const name = normalizeProfileName(entry.name);
+    const hostname = normalizeProfileHostname(entry.hostname);
+    const token = normalizeProfileToken(entry.token);
+    if (!provider || !mode || !name || !hostname || !token) continue;
+    const key = `${provider}::${name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    profiles.push({
+      id,
+      name,
+      provider,
+      mode,
+      hostname,
+      token,
+      createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
+      updatedAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : Date.now(),
+    });
+  }
+  return { version: TUNNEL_PROFILES_VERSION, profiles };
+}
+
+function readTunnelProfilesFromDisk() {
   try {
-    const tmpDir = os.tmpdir();
-    const files = fs.readdirSync(tmpDir);
-    const pidFiles = files.filter((file) => file.startsWith('openchamber-') && file.endsWith('.pid'));
-    for (const file of pidFiles) {
-      const port = parseInt(file.replace('openchamber-', '').replace('.pid', ''), 10);
-      if (!Number.isFinite(port) || port <= 0) {
-        continue;
+    const raw = fs.readFileSync(getTunnelProfilesFilePath(), 'utf8');
+    return sanitizeTunnelProfilesData(JSON.parse(raw));
+  } catch {
+    return { version: TUNNEL_PROFILES_VERSION, profiles: [] };
+  }
+}
+
+function writeTunnelProfilesToDisk(data) {
+  const filePath = getTunnelProfilesFilePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(sanitizeTunnelProfilesData(data), null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+function readLegacyManagedRemoteEntries() {
+  try {
+    const raw = fs.readFileSync(getLegacyCloudflareManagedRemoteFilePath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    const tunnels = Array.isArray(parsed?.tunnels) ? parsed.tunnels : [];
+    return tunnels
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const id = typeof entry.id === 'string' && entry.id.trim().length > 0 ? entry.id.trim() : crypto.randomUUID();
+        const name = normalizeProfileName(entry.name);
+        const hostname = normalizeProfileHostname(entry.hostname);
+        const token = normalizeProfileToken(entry.token);
+        if (!name || !hostname || !token) return null;
+        return {
+          id,
+          name,
+          provider: 'cloudflare',
+          mode: 'managed-remote',
+          hostname,
+          token,
+          createdAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : Date.now(),
+          updatedAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : Date.now(),
+        };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function makeUniqueProfileName(provider, desiredName, existingProfiles) {
+  const normalizedDesired = normalizeProfileName(desiredName);
+  if (!normalizedDesired) {
+    return '';
+  }
+  const existingNames = new Set(
+    existingProfiles
+      .filter((entry) => entry.provider === provider)
+      .map((entry) => entry.name.toLowerCase())
+  );
+
+  if (!existingNames.has(normalizedDesired.toLowerCase())) {
+    return normalizedDesired;
+  }
+
+  let index = 2;
+  while (true) {
+    const candidate = `${normalizedDesired}-${index}`;
+    if (!existingNames.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+    index += 1;
+  }
+}
+
+function ensureTunnelProfilesMigrated() {
+  const current = readTunnelProfilesFromDisk();
+  if (current.profiles.length > 0) {
+    return current;
+  }
+
+  const legacyEntries = readLegacyManagedRemoteEntries();
+  if (legacyEntries.length === 0) {
+    return current;
+  }
+
+  const migratedProfiles = [];
+  for (const entry of legacyEntries) {
+    const name = makeUniqueProfileName(entry.provider, entry.name, migratedProfiles);
+    migratedProfiles.push({ ...entry, name });
+  }
+
+  const migrated = sanitizeTunnelProfilesData({ version: TUNNEL_PROFILES_VERSION, profiles: migratedProfiles });
+  writeTunnelProfilesToDisk(migrated);
+  return migrated;
+}
+
+function resolveProfileByName(profiles, profileName, provider) {
+  const normalizedName = normalizeProfileName(profileName).toLowerCase();
+  const normalizedProvider = normalizeProfileProvider(provider);
+  const matches = profiles.filter((entry) => {
+    if (entry.name.toLowerCase() !== normalizedName) return false;
+    if (!normalizedProvider) return true;
+    return entry.provider === normalizedProvider;
+  });
+
+  if (matches.length === 0) {
+    return { profile: null, error: `No tunnel profile found for name '${profileName}'. Run 'openchamber tunnel profile list'.` };
+  }
+  if (matches.length > 1) {
+    return { profile: null, error: `Profile name '${profileName}' exists for multiple providers. Use --provider <id>.` };
+  }
+  return { profile: matches[0], error: null };
+}
+
+function rotateLogFile(logPath) {
+  try {
+    const stats = fs.statSync(logPath);
+    if (stats.size < LOG_ROTATE_MAX_BYTES) {
+      return;
+    }
+  } catch {
+    return;
+  }
+
+  for (let i = LOG_ROTATE_KEEP - 1; i >= 1; i--) {
+    const src = `${logPath}.${i}`;
+    const dst = `${logPath}.${i + 1}`;
+    if (fs.existsSync(src)) {
+      try {
+        fs.renameSync(src, dst);
+      } catch {
       }
-      const pidFilePath = path.join(tmpDir, file);
-      const pid = readPidFile(pidFilePath);
-      if (pid && isProcessRunning(pid)) {
-        ports.push(port);
-      }
+    }
+  }
+
+  try {
+    if (fs.existsSync(logPath)) {
+      fs.renameSync(logPath, `${logPath}.1`);
     }
   } catch {
   }
-  return Array.from(new Set(ports));
-}
-
-async function fetchTunnelProvidersFromPort(port, fetchImpl = globalThis.fetch) {
-  if (!Number.isFinite(port) || port <= 0 || typeof fetchImpl !== 'function') {
-    return null;
-  }
-  try {
-    const response = await fetchImpl(`http://127.0.0.1:${port}/api/openchamber/tunnel/providers`);
-    if (!response.ok) {
-      return null;
-    }
-    const body = await response.json().catch(() => null);
-    if (!body || !Array.isArray(body.providers)) {
-      return null;
-    }
-    return body.providers;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveTunnelProviders(options = {}, deps = {}) {
-  const readPorts = typeof deps.readPorts === 'function' ? deps.readPorts : listRunningInstancePorts;
-  const fetchImpl = typeof deps.fetchImpl === 'function' ? deps.fetchImpl : globalThis.fetch;
-  const candidatePorts = [];
-  if (Number.isFinite(options.port) && options.port > 0) {
-    candidatePorts.push(options.port);
-  }
-  candidatePorts.push(...readPorts());
-  if (!candidatePorts.includes(DEFAULT_PORT)) {
-    candidatePorts.push(DEFAULT_PORT);
-  }
-
-  for (const port of candidatePorts) {
-    const providers = await fetchTunnelProvidersFromPort(port, fetchImpl);
-    if (providers) {
-      return { providers, source: `api:${port}` };
-    }
-  }
-
-  return {
-    providers: DEFAULT_TUNNEL_PROVIDER_CAPABILITIES,
-    source: 'fallback',
-  };
 }
 
 const WINDOWS_EXTENSIONS = process.platform === 'win32'
@@ -350,7 +647,7 @@ function isExecutable(filePath) {
     }
     fs.accessSync(filePath, fs.constants.X_OK);
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -397,58 +694,6 @@ async function checkOpenCodeCLI() {
     return resolvedFromPath;
   }
 
-  if (process.platform !== 'win32') {
-    const shellCandidates = [];
-    if (process.env.SHELL) {
-      shellCandidates.push(process.env.SHELL);
-    }
-    shellCandidates.push('/bin/bash', '/bin/zsh', '/bin/sh');
-
-    for (const shellPath of shellCandidates) {
-      if (!shellPath || !isExecutable(shellPath)) {
-        continue;
-      }
-      try {
-        const result = spawnSync(shellPath, ['-lic', 'command -v opencode'], {
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        if (result.status === 0) {
-          const candidate = result.stdout.trim().split(/\s+/).pop();
-          if (candidate && isExecutable(candidate)) {
-            const dir = path.dirname(candidate);
-            const currentPath = process.env.PATH || '';
-            const segments = currentPath.split(path.delimiter).filter(Boolean);
-            if (!segments.includes(dir)) {
-              segments.unshift(dir);
-              process.env.PATH = segments.join(path.delimiter);
-            }
-            process.env.OPENCODE_BINARY = candidate;
-            return candidate;
-          }
-        }
-      } catch (error) {
-
-      }
-    }
-  } else {
-    try {
-      const result = spawnSync('where', ['opencode'], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      if (result.status === 0) {
-        const candidate = result.stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0);
-        if (candidate && isExecutable(candidate)) {
-          process.env.OPENCODE_BINARY = candidate;
-          return candidate;
-        }
-      }
-    } catch (error) {
-
-    }
-  }
-
   console.error('Error: Unable to locate the opencode CLI on PATH.');
   console.error(`Current PATH: ${process.env.PATH || '<empty>'}`);
   console.error('Ensure the CLI is installed and reachable, or set OPENCODE_BINARY to its full path.');
@@ -460,9 +705,6 @@ async function isPortAvailable(port) {
     return false;
   }
 
-  // Don't specify host here; `server.listen(port)` in the web server also doesn't,
-  // and on some platforms (notably macOS) IPv4/IPv6 binding differences can make
-  // a 127.0.0.1-only probe report "free" while the real server bind fails.
   return await new Promise((resolve) => {
     const server = net.createServer();
     server.unref();
@@ -473,54 +715,41 @@ async function isPortAvailable(port) {
   });
 }
 
-
-async function resolveAvailablePort(desiredPort) {
+async function resolveAvailablePort(desiredPort, explicitPort = false) {
   const startPort = Number.isFinite(desiredPort) ? Math.trunc(desiredPort) : DEFAULT_PORT;
-
-  // If user explicitly chose a port (incl 0), respect it.
-  if (process.argv.includes('--port') || process.argv.includes('-p')) {
+  if (explicitPort) {
     return startPort;
   }
-
-  // Prefer the default port for predictable URLs, but fall back to an OS-assigned
-  // free port when it is already in use.
   if (await isPortAvailable(startPort)) {
     return startPort;
   }
-
   console.warn(`Port ${startPort} in use; using a free port`);
   return 0;
 }
 
 async function getPidFilePath(port) {
-  const os = await import('os');
   const tmpDir = os.tmpdir();
   return path.join(tmpDir, `openchamber-${port}.pid`);
 }
 
 async function getInstanceFilePath(port) {
-  const os = await import('os');
   const tmpDir = os.tmpdir();
   return path.join(tmpDir, `openchamber-${port}.json`);
 }
 
-
 function readPidFile(pidFilePath) {
   try {
     const content = fs.readFileSync(pidFilePath, 'utf8').trim();
-    const pid = parseInt(content);
-    if (isNaN(pid)) {
-      return null;
-    }
-    return pid;
-  } catch (error) {
+    const pid = parseInt(content, 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
     return null;
   }
 }
 
 function writePidFile(pidFilePath, pid) {
   try {
-    fs.writeFileSync(pidFilePath, pid.toString());
+    fs.writeFileSync(pidFilePath, String(pid));
   } catch (error) {
     console.warn(`Warning: Could not write PID file: ${error.message}`);
   }
@@ -531,49 +760,25 @@ function removePidFile(pidFilePath) {
     if (fs.existsSync(pidFilePath)) {
       fs.unlinkSync(pidFilePath);
     }
-  } catch (error) {
-    console.warn(`Warning: Could not remove PID file: ${error.message}`);
+  } catch {
   }
 }
 
-/**
- * Read stored instance options (port, daemon, uiPassword)
- */
 function readInstanceOptions(instanceFilePath) {
   try {
-    const content = fs.readFileSync(instanceFilePath, 'utf8');
-    return JSON.parse(content);
-  } catch (error) {
+    return JSON.parse(fs.readFileSync(instanceFilePath, 'utf8'));
+  } catch {
     return null;
   }
 }
 
-/**
- * Write instance options for restart/update to reuse
- */
 function writeInstanceOptions(instanceFilePath, options) {
   try {
-    // Only store non-sensitive restart-relevant options
     const toStore = {
       port: options.port,
-      daemon: options.daemon || false,
-      tryCfTunnel: options.tryCfTunnel === true,
-      tunnelProvider: typeof options.tunnelProvider === 'string' ? options.tunnelProvider : undefined,
-      tunnelMode: typeof options.tunnelMode === 'string' ? options.tunnelMode : undefined,
-      tunnelConfigPath: options.tunnelConfigPath === null
-        ? null
-        : (typeof options.tunnelConfigPath === 'string' ? options.tunnelConfigPath : undefined),
-      tunnelHostname: typeof options.tunnelHostname === 'string' ? options.tunnelHostname : undefined,
-      // Store password existence but not value - will use env var
+      uiPassword: typeof options.uiPassword === 'string' ? options.uiPassword : undefined,
       hasUiPassword: typeof options.uiPassword === 'string',
     };
-    // For daemon mode, we need to store the password to restart properly
-    if (options.daemon && typeof options.uiPassword === 'string') {
-      toStore.uiPassword = options.uiPassword;
-    }
-    if (options.daemon && typeof options.tunnelToken === 'string') {
-      toStore.tunnelToken = options.tunnelToken;
-    }
     fs.writeFileSync(instanceFilePath, JSON.stringify(toStore, null, 2));
   } catch (error) {
     console.warn(`Warning: Could not write instance file: ${error.message}`);
@@ -585,8 +790,7 @@ function removeInstanceFile(instanceFilePath) {
     if (fs.existsSync(instanceFilePath)) {
       fs.unlinkSync(instanceFilePath);
     }
-  } catch (error) {
-    // Ignore
+  } catch {
   }
 }
 
@@ -594,7 +798,7 @@ function isProcessRunning(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -616,611 +820,859 @@ async function requestServerShutdown(port) {
   }
 }
 
-const commands = {
-  async serve(options) {
-    options.port = await resolveAvailablePort(options.port);
+async function requestJson(port, endpoint, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
+      ...options,
+      headers: {
+        Accept: 'application/json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(options.headers || {}),
+      },
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => null);
+    return { response, body };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
-    const portWasSpecified = process.argv.includes('--port') || process.argv.includes('-p');
+async function discoverRunningInstances() {
+  const instances = [];
+  const tmpDir = os.tmpdir();
+  try {
+    const files = fs.readdirSync(tmpDir);
+    const pidFiles = files.filter((file) => file.startsWith('openchamber-') && file.endsWith('.pid'));
+    for (const file of pidFiles) {
+      const port = parseInt(file.replace('openchamber-', '').replace('.pid', ''), 10);
+      if (!Number.isFinite(port) || port <= 0) continue;
+      const pidFilePath = path.join(tmpDir, file);
+      const pid = readPidFile(pidFilePath);
+      if (!pid || !isProcessRunning(pid)) {
+        removePidFile(pidFilePath);
+        removeInstanceFile(path.join(tmpDir, `openchamber-${port}.json`));
+        continue;
+      }
+      const instanceFilePath = path.join(tmpDir, `openchamber-${port}.json`);
+      let mtime = 0;
+      try {
+        mtime = fs.statSync(pidFilePath).mtimeMs;
+      } catch {
+      }
+      instances.push({ port, pid, pidFilePath, instanceFilePath, mtime });
+    }
+  } catch {
+  }
+  instances.sort((a, b) => a.port - b.port);
+  return instances;
+}
 
-    // When using dynamic port (port=0), don't use pid/instance files - the port is
-    // unknown until the server binds.
-    if (options.port !== 0) {
-      const pidFilePath = await getPidFilePath(options.port);
-      const instanceFilePath = await getInstanceFilePath(options.port);
+function getLatestInstance(instances) {
+  if (!instances.length) return null;
+  return [...instances].sort((a, b) => b.mtime - a.mtime)[0];
+}
 
-      const existingPid = readPidFile(pidFilePath);
-      if (existingPid && isProcessRunning(existingPid)) {
-        console.error(`Error: OpenChamber is already running on port ${options.port} (PID: ${existingPid})`);
-        console.error('Use "openchamber stop" to stop the existing instance');
-        process.exit(1);
+async function fetchTunnelProvidersFromPort(port, fetchImpl = globalThis.fetch) {
+  if (!Number.isFinite(port) || port <= 0 || typeof fetchImpl !== 'function') {
+    return null;
+  }
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${port}/api/openchamber/tunnel/providers`);
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => null);
+    if (!body || !Array.isArray(body.providers)) return null;
+    return body.providers;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveTunnelProviders(options = {}, deps = {}) {
+  const readPorts = typeof deps.readPorts === 'function'
+    ? deps.readPorts
+    : async () => (await discoverRunningInstances()).map((entry) => entry.port);
+  const fetchImpl = typeof deps.fetchImpl === 'function' ? deps.fetchImpl : globalThis.fetch;
+
+  const candidatePorts = [];
+  if (Number.isFinite(options.port) && options.port > 0) {
+    candidatePorts.push(options.port);
+  }
+
+  const discoveredPorts = await Promise.resolve(readPorts());
+  if (Array.isArray(discoveredPorts)) {
+    candidatePorts.push(...discoveredPorts);
+  }
+
+  if (!candidatePorts.includes(DEFAULT_PORT)) {
+    candidatePorts.push(DEFAULT_PORT);
+  }
+
+  for (const port of candidatePorts) {
+    const providers = await fetchTunnelProvidersFromPort(port, fetchImpl);
+    if (providers) {
+      return { providers, source: `api:${port}` };
+    }
+  }
+
+  return { providers: DEFAULT_TUNNEL_PROVIDER_CAPABILITIES, source: 'fallback' };
+}
+
+async function resolveTargetInstance({
+  options,
+  allowAutoStart,
+  requireAll = false,
+}) {
+  let running = await discoverRunningInstances();
+
+  if (options.all && requireAll) {
+    if (running.length === 0) {
+      throw new Error('No running OpenChamber instance found. Start one with `openchamber serve`.');
+    }
+    return running;
+  }
+
+  if (options.explicitPort) {
+    const found = running.find((entry) => entry.port === options.port);
+    if (found) {
+      return found;
+    }
+    if (allowAutoStart) {
+      await commands.serve({ port: options.port, explicitPort: true, uiPassword: options.uiPassword });
+      running = await discoverRunningInstances();
+      const started = running.find((entry) => entry.port === options.port);
+      if (started) return started;
+    }
+    throw new Error(`No running OpenChamber instance found on port ${options.port}.`);
+  }
+
+  if (running.length === 1) {
+    return running[0];
+  }
+
+  if (running.length === 0) {
+    if (allowAutoStart) {
+      const startedPort = await commands.serve({ ...options, explicitPort: false });
+      running = await discoverRunningInstances();
+      const started = running.find((entry) => entry.port === startedPort) || getLatestInstance(running);
+      if (started) return started;
+    }
+    throw new Error('No running OpenChamber instance found. Start one with `openchamber serve`.');
+  }
+
+  const ports = running.map((entry) => entry.port).join(', ');
+  throw new Error(`Multiple OpenChamber instances found: ${ports}. Use --port <port> or --all.`);
+}
+
+function formatTunnelStatusLine(statusBody, port) {
+  const active = Boolean(statusBody?.active);
+  const provider = statusBody?.provider || 'unknown';
+  const mode = statusBody?.mode || 'unknown';
+  const url = statusBody?.url || 'n/a';
+  return {
+    status: active ? 'success' : 'neutral',
+    line: `port ${port} ${active ? 'active' : 'inactive'} (${provider}/${mode})`,
+    detail: url,
+  };
+}
+
+function readTailLines(filePath, lineCount = DEFAULT_TAIL_LINES) {
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const lines = raw.split(/\r?\n/);
+  if (lines.length && lines[lines.length - 1] === '') {
+    lines.pop();
+  }
+  return lines.slice(Math.max(0, lines.length - lineCount));
+}
+
+function followFile(filePath, onLine) {
+  let position = 0;
+  try {
+    position = fs.statSync(filePath).size;
+  } catch {
+    position = 0;
+  }
+
+  let remainder = '';
+  const interval = setInterval(() => {
+    try {
+      const stats = fs.statSync(filePath);
+      if (stats.size < position) {
+        position = 0;
+      }
+      if (stats.size === position) {
+        return;
       }
 
-      // Persist for restart/update to reuse the chosen port.
-      writeInstanceOptions(instanceFilePath, { ...options });
-    } else if (portWasSpecified) {
-      // Explicitly requested port=0; nothing to persist.
+      const fd = fs.openSync(filePath, 'r');
+      try {
+        const length = stats.size - position;
+        const buffer = Buffer.alloc(length);
+        fs.readSync(fd, buffer, 0, length, position);
+        position = stats.size;
+        const chunk = remainder + buffer.toString('utf8');
+        const parts = chunk.split(/\r?\n/);
+        remainder = parts.pop() || '';
+        for (const line of parts) {
+          onLine(line);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+    }
+  }, 400);
+
+  return () => {
+    clearInterval(interval);
+  };
+}
+
+async function handleTunnelProfileSubcommand(options, action) {
+  const sub = action || 'list';
+  const store = ensureTunnelProfilesMigrated();
+
+  if (sub === 'list') {
+    const providerFilter = normalizeProfileProvider(options.provider);
+    const profiles = providerFilter
+      ? store.profiles.filter((entry) => entry.provider === providerFilter)
+      : store.profiles;
+    if (options.json) {
+      console.log(JSON.stringify({ profiles }, null, 2));
+      return;
+    }
+
+    printSectionStart('Tunnel Profiles');
+    for (const profile of profiles) {
+      printListItem({
+        status: 'success',
+        line: `${profile.name} (${profile.provider}/${profile.mode})`,
+        detail: `${profile.hostname} token:${maskToken(profile.token)}`,
+      });
+    }
+    printSectionEnd(`${profiles.length} profile(s)`);
+    return;
+  }
+
+  if (sub === 'show') {
+    const name = normalizeProfileName(options.name);
+    if (!name) {
+      throw new Error('`tunnel profile show` requires --name <name>.');
+    }
+    const { profile, error } = resolveProfileByName(store.profiles, name, options.provider);
+    if (!profile) {
+      throw new Error(error);
+    }
+    if (options.json) {
+      console.log(JSON.stringify({ profile }, null, 2));
+      return;
+    }
+    printSectionStart('Tunnel Profile');
+    printListItem({
+      status: 'success',
+      line: `${profile.name} (${profile.provider}/${profile.mode})`,
+      detail: `${profile.hostname} token:${maskToken(profile.token)}`,
+    });
+    printSectionEnd('show complete');
+    return;
+  }
+
+  if (sub === 'add') {
+    const provider = normalizeProfileProvider(options.provider);
+    const mode = normalizeProfileMode(options.mode);
+    const name = normalizeProfileName(options.name);
+    const hostname = normalizeProfileHostname(options.hostname);
+    const token = normalizeProfileToken(options.token);
+
+    if (!provider || !mode || !name || !hostname || !token) {
+      throw new Error('`tunnel profile add` requires --provider, --mode managed-remote, --name, --hostname, and --token.');
+    }
+    if (mode !== 'managed-remote') {
+      throw new Error('`tunnel profile add` currently supports only --mode managed-remote.');
+    }
+
+    const existingIndex = store.profiles.findIndex(
+      (entry) => entry.provider === provider && entry.name.toLowerCase() === name.toLowerCase()
+    );
+
+    if (existingIndex >= 0 && !options.force) {
+      throw new Error(`Profile '${name}' already exists for provider '${provider}'. Use --force to overwrite.`);
+    }
+
+    const next = [...store.profiles];
+    const now = Date.now();
+    if (existingIndex >= 0) {
+      const current = next[existingIndex];
+      next[existingIndex] = {
+        ...current,
+        mode,
+        hostname,
+        token,
+        updatedAt: now,
+      };
+    } else {
+      next.push({
+        id: crypto.randomUUID(),
+        name,
+        provider,
+        mode,
+        hostname,
+        token,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    const persisted = { version: TUNNEL_PROFILES_VERSION, profiles: next };
+    writeTunnelProfilesToDisk(persisted);
+    const added = persisted.profiles.find((entry) => entry.provider === provider && entry.name.toLowerCase() === name.toLowerCase());
+
+    if (options.json) {
+      console.log(JSON.stringify({ ok: true, profile: added }, null, 2));
+      return;
+    }
+
+    printSectionStart('Tunnel Profile Saved');
+    printListItem({
+      status: 'success',
+      line: `${added.name} (${added.provider}/${added.mode})`,
+      detail: `${added.hostname} token:${maskToken(added.token)}`,
+    });
+    printSectionEnd('save complete');
+    return;
+  }
+
+  if (sub === 'remove') {
+    const name = normalizeProfileName(options.name);
+    if (!name) {
+      throw new Error('`tunnel profile remove` requires --name <name>.');
+    }
+    const { profile, error } = resolveProfileByName(store.profiles, name, options.provider);
+    if (!profile) {
+      throw new Error(error);
+    }
+
+    const next = store.profiles.filter((entry) => entry.id !== profile.id);
+    writeTunnelProfilesToDisk({ version: TUNNEL_PROFILES_VERSION, profiles: next });
+
+    if (options.json) {
+      console.log(JSON.stringify({ ok: true, removed: profile }, null, 2));
+      return;
+    }
+
+    printSectionStart('Tunnel Profile Removed');
+    printListItem({
+      status: 'success',
+      line: `${profile.name} (${profile.provider}/${profile.mode})`,
+      detail: profile.hostname,
+    });
+    printSectionEnd('remove complete');
+    return;
+  }
+
+  throw new Error(`Unknown tunnel profile subcommand '${sub}'. Use 'openchamber tunnel help'.`);
+}
+
+const commands = {
+  async serve(options) {
+    const explicitPort = options.explicitPort === true;
+    const targetPort = await resolveAvailablePort(options.port, explicitPort);
+
+    if (targetPort !== 0) {
+      const pidFilePath = await getPidFilePath(targetPort);
+      const existingPid = readPidFile(pidFilePath);
+      if (existingPid && isProcessRunning(existingPid)) {
+        throw new Error(`OpenChamber is already running on port ${targetPort} (PID: ${existingPid})`);
+      }
     }
 
     const opencodeBinary = await checkOpenCodeCLI();
-
     const serverPath = path.join(__dirname, '..', 'server', 'index.js');
-
-    const normalizedTunnelProvider = typeof options.tunnelProvider === 'string' && options.tunnelProvider.trim().length > 0
-      ? options.tunnelProvider.trim().toLowerCase()
-      : undefined;
-    const normalizedTunnelMode = typeof options.tunnelMode === 'string' && options.tunnelMode.trim().length > 0
-      ? options.tunnelMode.trim().toLowerCase()
-      : undefined;
-    const hasCanonicalTunnelOptions = Boolean(
-      normalizedTunnelProvider
-      || normalizedTunnelMode
-      || options.tunnelConfigPath === null
-      || typeof options.tunnelConfigPath === 'string'
-      || typeof options.tunnelToken === 'string'
-      || typeof options.tunnelHostname === 'string'
-    );
-
-    const startupTunnel = hasCanonicalTunnelOptions
-      ? {
-          provider: normalizedTunnelProvider || 'cloudflare',
-          mode: normalizedTunnelMode || 'quick',
-          configPath: options.tunnelConfigPath,
-          token: typeof options.tunnelToken === 'string' ? options.tunnelToken.trim() : '',
-          hostname: typeof options.tunnelHostname === 'string' ? options.tunnelHostname.trim() : '',
-        }
-      : (options.tryCfTunnel
-        ? {
-            provider: 'cloudflare',
-            mode: 'quick',
-            configPath: undefined,
-            token: '',
-            hostname: '',
-          }
-        : null);
-
-    let effectiveUiPassword = options.uiPassword;
-    let showAutoGeneratedPassword = false;
-
-    if (startupTunnel && typeof effectiveUiPassword !== 'string') {
-      effectiveUiPassword = generateRandomPassword(16);
-      showAutoGeneratedPassword = true;
-    }
-
-    const serverArgs = [serverPath, '--port', options.port.toString()];
-    if (typeof effectiveUiPassword === 'string') {
-      serverArgs.push('--ui-password', effectiveUiPassword);
-    }
-    if (options.tryCfTunnel) {
-      serverArgs.push('--try-cf-tunnel');
-    }
-    if (startupTunnel) {
-      serverArgs.push('--tunnel-provider', startupTunnel.provider);
-      serverArgs.push('--tunnel-mode', startupTunnel.mode);
-      if (startupTunnel.configPath === null) {
-        serverArgs.push('--tunnel-config');
-      } else if (typeof startupTunnel.configPath === 'string' && startupTunnel.configPath.trim().length > 0) {
-        serverArgs.push('--tunnel-config', startupTunnel.configPath.trim());
-      }
-      if (startupTunnel.token) {
-        serverArgs.push('--tunnel-token', startupTunnel.token);
-      }
-      if (startupTunnel.hostname) {
-        serverArgs.push('--tunnel-hostname', startupTunnel.hostname);
-      }
-    }
-
     const preferredRuntime = getPreferredServerRuntime();
     const runtimeBin = preferredRuntime === 'bun' ? BUN_BIN : process.execPath;
 
-    if (options.daemon) {
-      const child = spawn(runtimeBin, serverArgs, {
-        detached: true,
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-        env: {
-          ...process.env,
-          OPENCHAMBER_PORT: options.port.toString(),
-          OPENCODE_BINARY: opencodeBinary,
-          ...(typeof effectiveUiPassword === 'string' ? { OPENCHAMBER_UI_PASSWORD: effectiveUiPassword } : {}),
-          OPENCHAMBER_TRY_CF_TUNNEL: options.tryCfTunnel ? 'true' : 'false',
-          ...(startupTunnel ? {
-            OPENCHAMBER_TUNNEL_PROVIDER: startupTunnel.provider,
-            OPENCHAMBER_TUNNEL_MODE: startupTunnel.mode,
-            ...(startupTunnel.configPath === null ? { OPENCHAMBER_TUNNEL_CONFIG: '' } : {}),
-            ...(typeof startupTunnel.configPath === 'string' ? { OPENCHAMBER_TUNNEL_CONFIG: startupTunnel.configPath } : {}),
-            ...(startupTunnel.token ? { OPENCHAMBER_TUNNEL_TOKEN: startupTunnel.token } : {}),
-            ...(startupTunnel.hostname ? { OPENCHAMBER_TUNNEL_HOSTNAME: startupTunnel.hostname } : {}),
-          } : {}),
-          ...(process.env.OPENCODE_SKIP_START ? { OPENCHAMBER_SKIP_OPENCODE_START: process.env.OPENCODE_SKIP_START } : {}),
-        }
-      });
+    ensureLogsDir();
+    const initialLogPort = targetPort === 0 ? 'auto' : String(targetPort);
+    const initialLogPath = getLogFilePath(initialLogPort);
+    rotateLogFile(initialLogPath);
+    const logFd = fs.openSync(initialLogPath, 'a');
 
-      child.unref();
-
-      const resolvedPort = await new Promise((resolve) => {
-        let settled = false;
-        const timeout = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          resolve(options.port);
-        }, 5000);
-
-        child.on('message', (msg) => {
-          if (settled) return;
-          if (msg && msg.type === 'openchamber:ready' && typeof msg.port === 'number') {
-            settled = true;
-            clearTimeout(timeout);
-            resolve(msg.port);
-          }
-        });
-
-        child.on('exit', () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          resolve(options.port);
-        });
-      });
-
-      // Important: in daemon mode we must close the IPC channel, otherwise the CLI
-      // process can hang around as the parent of the detached server.
-      try {
-        child.removeAllListeners('message');
-        child.removeAllListeners('exit');
-        if (typeof child.disconnect === 'function' && child.connected) {
-          child.disconnect();
-        }
-      } catch {
-        // ignore
-      }
-
-      if (isProcessRunning(child.pid)) {
-        const pidFilePathResolved = await getPidFilePath(resolvedPort);
-        const instanceFilePathResolved = await getInstanceFilePath(resolvedPort);
-
-        writePidFile(pidFilePathResolved, child.pid);
-        writeInstanceOptions(instanceFilePathResolved, { ...options, port: resolvedPort, uiPassword: effectiveUiPassword });
-
-        console.log(`OpenChamber started in daemon mode on port ${resolvedPort}`);
-        console.log(`PID: ${child.pid}`);
-        console.log(`Visit: http://localhost:${resolvedPort}`);
-        if (showAutoGeneratedPassword) {
-          console.log(`\n🔐 Auto-generated password: \x1b[92m${effectiveUiPassword}\x1b[0m`);
-          console.log('⚠️  Save this password - it won\'t be shown again!\n');
-        }
-      } else {
-        console.error('Failed to start server in daemon mode');
-        process.exit(1);
-      }
-
-      return;
+    const effectiveUiPassword = typeof options.uiPassword === 'string' ? options.uiPassword : undefined;
+    const serverArgs = [serverPath, '--port', String(targetPort)];
+    if (effectiveUiPassword) {
+      serverArgs.push('--ui-password', effectiveUiPassword);
     }
 
-    process.env.OPENCODE_BINARY = opencodeBinary;
-    if (typeof effectiveUiPassword === 'string') {
-      process.env.OPENCHAMBER_UI_PASSWORD = effectiveUiPassword;
-    }
-    if (process.env.OPENCODE_SKIP_START) {
-      process.env.OPENCHAMBER_SKIP_OPENCODE_START = process.env.OPENCODE_SKIP_START;
-    }
-    if (showAutoGeneratedPassword) {
-      console.log(`\n🔐 Auto-generated password: \x1b[92m${effectiveUiPassword}\x1b[0m`);
-      console.log('⚠️  Save this password - it won\'t be shown again!\n');
-    }
-
-    // Prefer bun when installed (much faster PTY). If CLI is running under Node,
-    // run the server in a child process so Node doesn't have to load bun-pty.
-    if (preferredRuntime === 'bun' && !isBunRuntime()) {
-      const child = spawn(runtimeBin, serverArgs, {
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          OPENCHAMBER_PORT: options.port.toString(),
-          OPENCODE_BINARY: opencodeBinary,
-          ...(typeof effectiveUiPassword === 'string' ? { OPENCHAMBER_UI_PASSWORD: effectiveUiPassword } : {}),
-          OPENCHAMBER_TRY_CF_TUNNEL: options.tryCfTunnel ? 'true' : 'false',
-          ...(startupTunnel ? {
-            OPENCHAMBER_TUNNEL_PROVIDER: startupTunnel.provider,
-            OPENCHAMBER_TUNNEL_MODE: startupTunnel.mode,
-            ...(startupTunnel.configPath === null ? { OPENCHAMBER_TUNNEL_CONFIG: '' } : {}),
-            ...(typeof startupTunnel.configPath === 'string' ? { OPENCHAMBER_TUNNEL_CONFIG: startupTunnel.configPath } : {}),
-            ...(startupTunnel.token ? { OPENCHAMBER_TUNNEL_TOKEN: startupTunnel.token } : {}),
-            ...(startupTunnel.hostname ? { OPENCHAMBER_TUNNEL_HOSTNAME: startupTunnel.hostname } : {}),
-          } : {}),
-          ...(process.env.OPENCODE_SKIP_START ? { OPENCHAMBER_SKIP_OPENCODE_START: process.env.OPENCODE_SKIP_START } : {}),
-        },
-      });
-
-      const signalHandlers = new Map();
-      const resolveExitCode = (code, signal) => {
-        if (typeof code === 'number') {
-          return code;
-        }
-        if (signal === 'SIGINT') {
-          return 130;
-        }
-        if (signal === 'SIGTERM') {
-          return 143;
-        }
-        if (signal === 'SIGQUIT') {
-          return 131;
-        }
-        return 1;
-      };
-      const cleanupSignalHandlers = () => {
-        for (const [signal, handler] of signalHandlers) {
-          process.off(signal, handler);
-        }
-        signalHandlers.clear();
-      };
-
-      let forwardedSignal = false;
-      const forwardSignal = (signal) => {
-        if (forwardedSignal) {
-          return;
-        }
-        forwardedSignal = true;
-
-        try {
-          if (child.exitCode === null && child.signalCode === null) {
-            child.kill(signal);
-          }
-        } catch {
-        }
-
-        const forceKillTimer = setTimeout(() => {
-          try {
-            if (child.exitCode === null && child.signalCode === null) {
-              child.kill('SIGKILL');
-            }
-          } catch {
-          }
-        }, 5000);
-        if (typeof forceKillTimer.unref === 'function') {
-          forceKillTimer.unref();
-        }
-        child.once('exit', () => {
-          clearTimeout(forceKillTimer);
-        });
-      };
-
-      for (const signal of ['SIGINT', 'SIGTERM', 'SIGQUIT']) {
-        const handler = () => {
-          forwardSignal(signal);
-        };
-        signalHandlers.set(signal, handler);
-        process.on(signal, handler);
-      }
-
-      child.on('error', (error) => {
-        cleanupSignalHandlers();
-        console.error(`Failed to start server process: ${error.message}`);
-        process.exit(1);
-      });
-
-      child.on('exit', (code, signal) => {
-        cleanupSignalHandlers();
-        process.exit(resolveExitCode(code, signal));
-      });
-
-      return;
-    }
-
-    const { startWebUiServer } = await importFromFilePath(serverPath);
-    await startWebUiServer({
-      port: options.port,
-      attachSignals: true,
-      exitOnShutdown: true,
-      uiPassword: typeof effectiveUiPassword === 'string' ? effectiveUiPassword : null,
-      tryCfTunnel: options.tryCfTunnel,
-      tunnelProvider: startupTunnel?.provider,
-      tunnelMode: startupTunnel?.mode,
-      tunnelConfigPath: startupTunnel?.configPath,
-      tunnelToken: startupTunnel?.token,
-      tunnelHostname: startupTunnel?.hostname,
-      onTunnelReady: async (url, connectUrl) => {
-        const displayUrl = connectUrl || buildTunnelUrl(url, effectiveUiPassword, options.tunnelPasswordUrl);
-        console.log(`\n🌐 Tunnel URL: \x1b[36m${displayUrl}\x1b[0m\n`);
-        if (connectUrl) {
-          console.log('🔑 One-time connect link (expires after first use)\n');
-        } else if (options.tunnelPasswordUrl && effectiveUiPassword) {
-          console.log('🔑 Password is embedded in URL for auto-login\n');
-        }
-        if (options.tunnelQr) {
-          await displayTunnelQrCode(displayUrl);
-        }
+    const child = spawn(runtimeBin, serverArgs, {
+      detached: true,
+      stdio: ['ignore', logFd, logFd, 'ipc'],
+      env: {
+        ...process.env,
+        OPENCHAMBER_PORT: String(targetPort),
+        OPENCODE_BINARY: opencodeBinary,
+        ...(effectiveUiPassword ? { OPENCHAMBER_UI_PASSWORD: effectiveUiPassword } : {}),
+        ...(process.env.OPENCODE_SKIP_START ? { OPENCHAMBER_SKIP_OPENCODE_START: process.env.OPENCODE_SKIP_START } : {}),
       },
     });
+
+    child.unref();
+
+    const resolvedPort = await new Promise((resolve) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(targetPort);
+      }, 5000);
+
+      child.on('message', (msg) => {
+        if (settled) return;
+        if (msg && msg.type === 'openchamber:ready' && typeof msg.port === 'number') {
+          settled = true;
+          clearTimeout(timeout);
+          resolve(msg.port);
+        }
+      });
+
+      child.on('exit', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(targetPort);
+      });
+    });
+
+    try {
+      if (typeof child.disconnect === 'function' && child.connected) {
+        child.disconnect();
+      }
+    } catch {
+    }
+
+    try {
+      fs.closeSync(logFd);
+    } catch {
+    }
+
+    const resolvedLogPath = getLogFilePath(resolvedPort);
+    if (initialLogPath !== resolvedLogPath && !fs.existsSync(resolvedLogPath)) {
+      try {
+        fs.renameSync(initialLogPath, resolvedLogPath);
+      } catch {
+      }
+    }
+
+    if (!isProcessRunning(child.pid)) {
+      throw new Error('Failed to start server in daemon mode');
+    }
+
+    const pidFilePath = await getPidFilePath(resolvedPort);
+    const instanceFilePath = await getInstanceFilePath(resolvedPort);
+    writePidFile(pidFilePath, child.pid);
+    writeInstanceOptions(instanceFilePath, {
+      port: resolvedPort,
+      uiPassword: effectiveUiPassword,
+    });
+
+    console.log(`OpenChamber started in daemon mode on port ${resolvedPort}`);
+    console.log(`PID: ${child.pid}`);
+    console.log(`Visit: http://localhost:${resolvedPort}`);
+    console.log(`Logs: ${resolvedLogPath}`);
+
+    return resolvedPort;
   },
 
   async stop(options) {
-    const os = await import('os');
-    const tmpDir = os.tmpdir();
-
-    let runningInstances = [];
-
-    try {
-      const files = fs.readdirSync(tmpDir);
-      const pidFiles = files.filter(file => file.startsWith('openchamber-') && file.endsWith('.pid'));
-
-      for (const file of pidFiles) {
-        const port = parseInt(file.replace('openchamber-', '').replace('.pid', ''));
-        if (!isNaN(port)) {
-          const pidFilePath = path.join(tmpDir, file);
-          const pid = readPidFile(pidFilePath);
-
-          if (pid && isProcessRunning(pid)) {
-            const instanceFilePath = path.join(tmpDir, `openchamber-${port}.json`);
-            runningInstances.push({ port, pid, pidFilePath, instanceFilePath });
-          } else {
-
-            removePidFile(pidFilePath);
-            removeInstanceFile(path.join(tmpDir, `openchamber-${port}.json`));
-          }
-        }
-      }
-    } catch (error) {
-
-    }
-
+    let runningInstances = await discoverRunningInstances();
     if (runningInstances.length === 0) {
       console.log('No running OpenChamber instances found');
       return;
     }
 
-    const portWasSpecified = process.argv.includes('--port') || process.argv.includes('-p');
-
-    if (portWasSpecified) {
-      const targetInstance = runningInstances.find(inst => inst.port === options.port);
-
-      if (!targetInstance) {
+    if (options.explicitPort) {
+      runningInstances = runningInstances.filter((entry) => entry.port === options.port);
+      if (runningInstances.length === 0) {
         console.log(`No OpenChamber instance found running on port ${options.port}`);
         return;
       }
-
-      console.log(`Stopping OpenChamber (PID: ${targetInstance.pid}, Port: ${targetInstance.port})...`);
-
-      try {
-        await requestServerShutdown(targetInstance.port);
-        process.kill(targetInstance.pid, 'SIGTERM');
-
-        let attempts = 0;
-        const maxAttempts = 10;
-
-        const checkShutdown = setInterval(() => {
-          attempts++;
-          if (!isProcessRunning(targetInstance.pid)) {
-            clearInterval(checkShutdown);
-            removePidFile(targetInstance.pidFilePath);
-            removeInstanceFile(targetInstance.instanceFilePath);
-            console.log('OpenChamber stopped successfully');
-          } else if (attempts >= maxAttempts) {
-            clearInterval(checkShutdown);
-            console.log('Force killing process...');
-            process.kill(targetInstance.pid, 'SIGKILL');
-            removePidFile(targetInstance.pidFilePath);
-            removeInstanceFile(targetInstance.instanceFilePath);
-            console.log('OpenChamber force stopped');
-          }
-        }, 500);
-
-      } catch (error) {
-        console.error(`Error stopping process: ${error.message}`);
-        process.exit(1);
-      }
-    } else {
-
-      console.log(`Stopping all OpenChamber instances (${runningInstances.length} found)...`);
-
-      for (const instance of runningInstances) {
-        console.log(`  Stopping instance on port ${instance.port} (PID: ${instance.pid})...`);
-
-        try {
-          await requestServerShutdown(instance.port);
-          process.kill(instance.pid, 'SIGTERM');
-
-          let attempts = 0;
-          const maxAttempts = 10;
-
-          await new Promise((resolve) => {
-            const checkShutdown = setInterval(() => {
-              attempts++;
-              if (!isProcessRunning(instance.pid)) {
-                clearInterval(checkShutdown);
-                removePidFile(instance.pidFilePath);
-                removeInstanceFile(instance.instanceFilePath);
-                console.log(`    Port ${instance.port} stopped successfully`);
-                resolve(true);
-              } else if (attempts >= maxAttempts) {
-                clearInterval(checkShutdown);
-                console.log(`    Force killing port ${instance.port}...`);
-                try {
-                  process.kill(instance.pid, 'SIGKILL');
-                  removePidFile(instance.pidFilePath);
-                  removeInstanceFile(instance.instanceFilePath);
-                  console.log(`    Port ${instance.port} force stopped`);
-                } catch (e) {
-
-                }
-                resolve(true);
-              }
-            }, 500);
-          });
-
-        } catch (error) {
-          console.error(`    Error stopping port ${instance.port}: ${error.message}`);
-        }
-      }
-
-      console.log('\nAll OpenChamber instances stopped');
-    }
-  },
-
-  async restart(options) {
-    const os = await import('os');
-    const tmpDir = os.tmpdir();
-
-    // Find running instances to get their stored options
-    let instancesToRestart = [];
-
-    try {
-      const files = fs.readdirSync(tmpDir);
-      const pidFiles = files.filter(file => file.startsWith('openchamber-') && file.endsWith('.pid'));
-
-      for (const file of pidFiles) {
-        const port = parseInt(file.replace('openchamber-', '').replace('.pid', ''));
-        if (!isNaN(port)) {
-          const pidFilePath = path.join(tmpDir, file);
-          const instanceFilePath = path.join(tmpDir, `openchamber-${port}.json`);
-          const pid = readPidFile(pidFilePath);
-
-          if (pid && isProcessRunning(pid)) {
-            const storedOptions = readInstanceOptions(instanceFilePath);
-            instancesToRestart.push({
-              port,
-              pid,
-              pidFilePath,
-              instanceFilePath,
-              storedOptions: storedOptions || { port, daemon: false },
-            });
-          }
-        }
-      }
-    } catch (error) {
-      // Ignore
     }
 
-    const portWasSpecified = process.argv.includes('--port') || process.argv.includes('-p');
-
-    if (instancesToRestart.length === 0) {
-      console.log('No running OpenChamber instances to restart');
-      console.log('Use "openchamber serve" to start a new instance');
-      return;
-    }
-
-    if (portWasSpecified) {
-      // Restart specific instance
-      const target = instancesToRestart.find(inst => inst.port === options.port);
-      if (!target) {
-        console.log(`No OpenChamber instance found running on port ${options.port}`);
-        return;
-      }
-      instancesToRestart = [target];
-    }
-
-    for (const instance of instancesToRestart) {
-      console.log(`Restarting OpenChamber on port ${instance.port}...`);
-
-      // Merge stored options with any explicitly provided options
-      const restartOptions = {
-        ...instance.storedOptions,
-        // CLI-provided options override stored ones
-        ...(portWasSpecified ? { port: options.port } : {}),
-        ...(process.argv.includes('--daemon') || process.argv.includes('-d') ? { daemon: options.daemon } : {}),
-        ...(process.argv.includes('--ui-password') ? { uiPassword: options.uiPassword } : {}),
-        ...(process.argv.includes('--try-cf-tunnel') ? { tryCfTunnel: options.tryCfTunnel } : {}),
-        ...(process.argv.includes('--tunnel-provider') ? { tunnelProvider: options.tunnelProvider } : {}),
-        ...(process.argv.includes('--tunnel-mode') ? { tunnelMode: options.tunnelMode } : {}),
-        ...(process.argv.includes('--tunnel-config') || process.argv.includes('--tunnel') ? { tunnelConfigPath: options.tunnelConfigPath } : {}),
-        ...(process.argv.includes('--tunnel-token') ? { tunnelToken: options.tunnelToken } : {}),
-        ...(process.argv.includes('--tunnel-hostname') ? { tunnelHostname: options.tunnelHostname } : {}),
-      };
-
-      // Stop the instance
+    for (const instance of runningInstances) {
+      console.log(`Stopping OpenChamber on port ${instance.port} (PID: ${instance.pid})...`);
       try {
         await requestServerShutdown(instance.port);
         process.kill(instance.pid, 'SIGTERM');
-        // Wait for it to stop
         let attempts = 0;
         while (isProcessRunning(instance.pid) && attempts < 20) {
-          await new Promise(resolve => setTimeout(resolve, 250));
+          await new Promise((resolve) => setTimeout(resolve, 250));
           attempts++;
         }
         if (isProcessRunning(instance.pid)) {
           process.kill(instance.pid, 'SIGKILL');
         }
         removePidFile(instance.pidFilePath);
+        removeInstanceFile(instance.instanceFilePath);
       } catch (error) {
-        console.warn(`Warning: Could not stop instance: ${error.message}`);
+        console.error(`Error stopping port ${instance.port}: ${error.message}`);
       }
+    }
+  },
 
-      // Small delay before restart
-      await new Promise(resolve => setTimeout(resolve, 500));
+  async restart(options) {
+    let runningInstances = await discoverRunningInstances();
+    if (runningInstances.length === 0) {
+      console.log('No running OpenChamber instances to restart');
+      return;
+    }
 
-      // Start with merged options
-      await commands.serve(restartOptions);
+    if (options.explicitPort) {
+      runningInstances = runningInstances.filter((entry) => entry.port === options.port);
+      if (runningInstances.length === 0) {
+        console.log(`No OpenChamber instance found running on port ${options.port}`);
+        return;
+      }
+    }
+
+    for (const instance of runningInstances) {
+      const storedOptions = readInstanceOptions(instance.instanceFilePath) || { port: instance.port };
+      await this.stop({ explicitPort: true, port: instance.port });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await this.serve({
+        port: options.explicitPort ? options.port : (storedOptions.port || instance.port),
+        explicitPort: true,
+        uiPassword: options.explicitUiPassword ? options.uiPassword : storedOptions.uiPassword,
+      });
     }
   },
 
   async status() {
-    const os = await import('os');
-    const tmpDir = os.tmpdir();
-
-    let runningInstances = [];
-    let stoppedInstances = [];
-
-    try {
-      const files = fs.readdirSync(tmpDir);
-      const pidFiles = files.filter(file => file.startsWith('openchamber-') && file.endsWith('.pid'));
-
-      for (const file of pidFiles) {
-        const port = parseInt(file.replace('openchamber-', '').replace('.pid', ''));
-        if (!isNaN(port)) {
-          const pidFilePath = path.join(tmpDir, file);
-          const pid = readPidFile(pidFilePath);
-
-          if (pid && isProcessRunning(pid)) {
-            runningInstances.push({ port, pid, pidFilePath });
-          } else {
-
-            removePidFile(pidFilePath);
-            stoppedInstances.push({ port });
-          }
-        }
-      }
-    } catch (error) {
-
-    }
-
+    const runningInstances = await discoverRunningInstances();
     if (runningInstances.length === 0) {
       console.log('OpenChamber Status:');
       console.log('  Status: Stopped');
-      if (stoppedInstances.length > 0) {
-        console.log(`  Previously used ports: ${stoppedInstances.map(s => s.port).join(', ')}`);
-      }
       return;
     }
 
     console.log('OpenChamber Status:');
-    for (const [index, instance] of runningInstances.entries()) {
-      if (runningInstances.length > 1) {
-        console.log(`\nInstance ${index + 1}:`);
-      }
-      console.log('  Status: Running');
-      console.log(`  PID: ${instance.pid}`);
-      console.log(`  Port: ${instance.port}`);
-      console.log(`  Visit: http://localhost:${instance.port}`);
-
-      try {
-        const { execSync } = await import('child_process');
-        const startTime = execSync(`ps -o lstart= -p ${instance.pid}`, { encoding: 'utf8' }).trim();
-        console.log(`  Start Time: ${startTime}`);
-      } catch (error) {
-
-      }
+    for (const instance of runningInstances) {
+      console.log(`  ✓ Port ${instance.port} (PID: ${instance.pid})`);
     }
   },
 
-  async 'tunnel-providers'(options) {
-    const { providers, source } = await resolveTunnelProviders(options);
-    if (source === 'fallback') {
-      console.warn('Warning: Could not reach a running OpenChamber server; using built-in provider capabilities.');
+  async tunnel(options, subcommand, action) {
+    switch (subcommand) {
+      case 'help':
+        showTunnelHelp();
+        return;
+      case 'profile':
+        await handleTunnelProfileSubcommand(options, action);
+        return;
+      case 'providers': {
+        const result = await resolveTunnelProviders(options, {
+          readPorts: async () => (await discoverRunningInstances()).map((entry) => entry.port),
+        });
+        if (options.json) {
+          console.log(JSON.stringify({ providers: result.providers, source: result.source }, null, 2));
+          return;
+        }
+        printSectionStart('Tunnel Providers');
+        for (const provider of result.providers) {
+          const modeCount = Array.isArray(provider?.modes) ? provider.modes.length : 0;
+          printListItem({
+            status: 'success',
+            line: `${provider.provider}`,
+            detail: `${modeCount} mode(s)`,
+          });
+        }
+        printSectionEnd(`${result.providers.length} provider(s)`);
+        return;
+      }
+      case 'check': {
+        const instance = await resolveTargetInstance({ options, allowAutoStart: false });
+        const provider = typeof options.provider === 'string' && options.provider.trim().length > 0
+          ? options.provider.trim().toLowerCase()
+          : 'cloudflare';
+        const { response, body } = await requestJson(instance.port, `/api/openchamber/tunnel/check?provider=${encodeURIComponent(provider)}`);
+        if (!response.ok) {
+          throw new Error(body?.error || `Tunnel check failed (${response.status})`);
+        }
+        if (options.json) {
+          console.log(JSON.stringify({ port: instance.port, ...body }, null, 2));
+          return;
+        }
+        printSectionStart('Tunnel Check');
+        printListItem({
+          status: body?.available ? 'success' : 'warning',
+          line: `port ${instance.port} provider ${body?.provider || provider}`,
+          detail: body?.available ? `available (${body?.version || 'unknown version'})` : 'missing dependency',
+        });
+        printSectionEnd('check complete');
+        return;
+      }
+      case 'status': {
+        let entries;
+        if (options.all) {
+          entries = await resolveTargetInstance({ options, allowAutoStart: false, requireAll: true });
+        } else {
+          entries = [await resolveTargetInstance({ options, allowAutoStart: false })];
+        }
+
+        const results = [];
+        for (const entry of entries) {
+          try {
+            const { response, body } = await requestJson(entry.port, '/api/openchamber/tunnel/status');
+            if (!response.ok) {
+              results.push({ port: entry.port, error: body?.error || `status ${response.status}` });
+              continue;
+            }
+            results.push({ port: entry.port, status: body });
+          } catch (error) {
+            results.push({ port: entry.port, error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify({ instances: results }, null, 2));
+          return;
+        }
+        printSectionStart('Tunnel Status');
+        for (const result of results) {
+          if (result.error) {
+            printListItem({ status: 'error', line: `port ${result.port} failed`, detail: result.error });
+            continue;
+          }
+          printListItem(formatTunnelStatusLine(result.status, result.port));
+        }
+        printSectionEnd(`${results.length} instance(s)`);
+        return;
+      }
+      case 'start': {
+        let provider = typeof options.provider === 'string' && options.provider.trim().length > 0
+          ? options.provider.trim().toLowerCase()
+          : '';
+        let mode = typeof options.mode === 'string' && options.mode.trim().length > 0
+          ? options.mode.trim().toLowerCase()
+          : '';
+        let token = typeof options.token === 'string' ? options.token : undefined;
+        let hostname = typeof options.hostname === 'string' ? options.hostname : undefined;
+        let selectedProfile = null;
+
+        if (typeof options.profile === 'string' && options.profile.trim().length > 0) {
+          const store = ensureTunnelProfilesMigrated();
+          const resolved = resolveProfileByName(store.profiles, options.profile, provider || options.provider);
+          if (!resolved.profile) {
+            throw new Error(resolved.error);
+          }
+          selectedProfile = resolved.profile;
+          provider = provider || selectedProfile.provider;
+          mode = mode || selectedProfile.mode;
+          token = typeof options.token === 'string' && options.token.trim().length > 0 ? options.token : selectedProfile.token;
+          hostname = typeof options.hostname === 'string' && options.hostname.trim().length > 0 ? options.hostname : selectedProfile.hostname;
+        }
+
+        if (!provider || !mode) {
+          throw new Error('`tunnel start` requires --provider and --mode. Run `openchamber tunnel help` for examples.');
+        }
+        if (mode === 'managed-remote') {
+          if (!(typeof token === 'string' && token.trim().length > 0)) {
+            throw new Error('Managed-remote mode requires --token <token>.');
+          }
+          if (!(typeof hostname === 'string' && hostname.trim().length > 0)) {
+            throw new Error('Managed-remote mode requires --hostname <hostname>.');
+          }
+        }
+
+        const instance = await resolveTargetInstance({ options, allowAutoStart: true });
+
+        if (selectedProfile && mode === 'managed-remote') {
+          const tokenSyncPayload = {
+            presetId: selectedProfile.id,
+            presetName: selectedProfile.name,
+            managedRemoteTunnelHostname: hostname,
+            managedRemoteTunnelToken: token,
+          };
+          const { response: presetResponse, body: presetBody } = await requestJson(instance.port, '/api/openchamber/tunnel/managed-remote-token', {
+            method: 'PUT',
+            body: JSON.stringify(tokenSyncPayload),
+          });
+          if (!presetResponse.ok || !presetBody?.ok) {
+            throw new Error(presetBody?.error || `Failed to sync tunnel profile token (${presetResponse.status})`);
+          }
+        }
+
+        const payload = {
+          provider,
+          mode,
+          ...(options.configPath === null ? { configPath: null } : {}),
+          ...(typeof options.configPath === 'string' ? { configPath: options.configPath } : {}),
+          ...(typeof token === 'string' ? { token } : {}),
+          ...(typeof hostname === 'string' ? { hostname } : {}),
+          ...(selectedProfile ? {
+            managedRemoteTunnelPresetId: selectedProfile.id,
+            managedRemoteTunnelPresetName: selectedProfile.name,
+          } : {}),
+        };
+
+        const { response, body } = await requestJson(instance.port, '/api/openchamber/tunnel/start', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok || !body?.ok) {
+          throw new Error(body?.error || `Tunnel start failed (${response.status})`);
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify({ port: instance.port, ...body }, null, 2));
+        } else {
+          printSectionStart('Tunnel Started');
+          printListItem({
+            status: 'success',
+            line: `port ${instance.port} ${body.provider}/${body.mode}`,
+            detail: body.url || 'n/a',
+          });
+          if (body.connectUrl) {
+            printListItem({ status: 'info', line: 'connect link', detail: body.connectUrl });
+          }
+          printSectionEnd('start complete');
+        }
+
+        if (options.qr) {
+          const url = body.connectUrl || body.url;
+          if (typeof url === 'string' && url.length > 0) {
+            await displayTunnelQrCode(url);
+          }
+        }
+        return;
+      }
+      case 'stop': {
+        let entries;
+        if (options.all) {
+          entries = await resolveTargetInstance({ options, allowAutoStart: false, requireAll: true });
+        } else {
+          entries = [await resolveTargetInstance({ options, allowAutoStart: false })];
+        }
+
+        const results = [];
+        for (const entry of entries) {
+          try {
+            const { response, body } = await requestJson(entry.port, '/api/openchamber/tunnel/stop', {
+              method: 'POST',
+            });
+            if (!response.ok) {
+              results.push({ port: entry.port, error: body?.error || `stop ${response.status}` });
+              continue;
+            }
+            results.push({ port: entry.port, result: body });
+          } catch (error) {
+            results.push({ port: entry.port, error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify({ instances: results }, null, 2));
+          return;
+        }
+        printSectionStart('Tunnel Stop');
+        for (const result of results) {
+          if (result.error) {
+            printListItem({ status: 'error', line: `port ${result.port} failed`, detail: result.error });
+            continue;
+          }
+          printListItem({
+            status: 'success',
+            line: `port ${result.port} stopped`,
+            detail: `revoked ${result.result?.revokedBootstrapCount || 0}, invalidated ${result.result?.invalidatedSessionCount || 0}`,
+          });
+        }
+        printSectionEnd(`${results.length} instance(s)`);
+        return;
+      }
+      default:
+        throw new Error(`Unknown tunnel subcommand '${subcommand}'. Use 'openchamber tunnel help'.`);
     }
-    console.log(JSON.stringify({ providers }, null, 2));
+  },
+
+  async logs(options) {
+    let targets = [];
+    const running = await discoverRunningInstances();
+
+    if (options.all) {
+      targets = running;
+      if (targets.length === 0) {
+        throw new Error('No running OpenChamber instance found.');
+      }
+    } else if (options.explicitPort) {
+      const found = running.find((entry) => entry.port === options.port);
+      if (!found) {
+        throw new Error(`No running OpenChamber instance found on port ${options.port}.`);
+      }
+      targets = [found];
+    } else {
+      const latest = getLatestInstance(running);
+      if (!latest) {
+        throw new Error('No running OpenChamber instance found.');
+      }
+      targets = [latest];
+    }
+
+    printSectionStart('OpenChamber Logs');
+
+    for (const target of targets) {
+      const logPath = getLogFilePath(target.port);
+      const lines = readTailLines(logPath, options.lines);
+      printListItem({
+        status: 'info',
+        line: `port ${target.port}`,
+        detail: logPath,
+      });
+
+      for (const line of lines) {
+        if (options.all) {
+          console.log(`[${target.port}] ${line}`);
+        } else {
+          console.log(line);
+        }
+      }
+    }
+
+    printSectionEnd(options.follow ? 'following (Ctrl+C to stop)' : 'tail complete');
+
+    if (!options.follow) {
+      return;
+    }
+
+    const unsubs = targets.map((target) => {
+      const logPath = getLogFilePath(target.port);
+      return followFile(logPath, (line) => {
+        if (options.all) {
+          console.log(`[${target.port}] ${line}`);
+        } else {
+          console.log(line);
+        }
+      });
+    });
+
+    await new Promise((resolve) => {
+      const onSignal = () => {
+        for (const unsub of unsubs) {
+          unsub();
+        }
+        process.off('SIGINT', onSignal);
+        process.off('SIGTERM', onSignal);
+        resolve();
+      };
+      process.on('SIGINT', onSignal);
+      process.on('SIGTERM', onSignal);
+    });
   },
 
   async update() {
-    const os = await import('os');
-    const tmpDir = os.tmpdir();
     const packageManagerPath = path.join(__dirname, '..', 'server', 'lib', 'package-manager.js');
     const {
       checkForUpdates,
@@ -1229,130 +1681,86 @@ const commands = {
       getCurrentVersion,
     } = await importFromFilePath(packageManagerPath);
 
-    // Check for running instances before update
-    let runningInstances = [];
-    try {
-      const files = fs.readdirSync(tmpDir);
-      const pidFiles = files.filter(file => file.startsWith('openchamber-') && file.endsWith('.pid'));
-
-      for (const file of pidFiles) {
-        const port = parseInt(file.replace('openchamber-', '').replace('.pid', ''));
-        if (!isNaN(port)) {
-          const pidFilePath = path.join(tmpDir, file);
-          const instanceFilePath = path.join(tmpDir, `openchamber-${port}.json`);
-          const pid = readPidFile(pidFilePath);
-
-          if (pid && isProcessRunning(pid)) {
-            const storedOptions = readInstanceOptions(instanceFilePath);
-            runningInstances.push({
-              port,
-              pid,
-              pidFilePath,
-              instanceFilePath,
-              storedOptions: storedOptions || { port, daemon: true },
-            });
-          }
-        }
-      }
-    } catch (error) {
-      // Ignore
-    }
+    const runningInstances = await discoverRunningInstances();
 
     console.log('Checking for updates...');
     console.log(`Current version: ${getCurrentVersion()}`);
 
     const updateInfo = await checkForUpdates();
-
     if (updateInfo.error) {
-      console.error(`Error: ${updateInfo.error}`);
-      process.exit(1);
+      throw new Error(updateInfo.error);
     }
-
     if (!updateInfo.available) {
-      console.log('\nYou are running the latest version.');
+      console.log('You are running the latest version.');
       return;
     }
 
-    console.log(`\nNew version available: ${updateInfo.version}`);
-
-    if (updateInfo.body) {
-      console.log('\nChangelog:');
-      console.log('─'.repeat(40));
-      // Simple formatting for CLI
-      const formatted = updateInfo.body
-        .replace(/^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}/gm, '\nv$1')
-        .replace(/^### /gm, '\n')
-        .replace(/^- /gm, '  • ');
-      console.log(formatted);
-      console.log('─'.repeat(40));
-    }
-
-    // Stop running instances before update
     if (runningInstances.length > 0) {
-      console.log(`\nStopping ${runningInstances.length} running instance(s) before update...`);
       for (const instance of runningInstances) {
         try {
           await requestServerShutdown(instance.port);
           process.kill(instance.pid, 'SIGTERM');
           let attempts = 0;
           while (isProcessRunning(instance.pid) && attempts < 20) {
-            await new Promise(resolve => setTimeout(resolve, 250));
+            await new Promise((resolve) => setTimeout(resolve, 250));
             attempts++;
           }
           if (isProcessRunning(instance.pid)) {
             process.kill(instance.pid, 'SIGKILL');
           }
           removePidFile(instance.pidFilePath);
-          console.log(`  Stopped instance on port ${instance.port}`);
-        } catch (error) {
-          console.warn(`  Warning: Could not stop instance on port ${instance.port}`);
+        } catch {
         }
       }
     }
 
     const pm = detectPackageManager();
-    console.log(`\nDetected package manager: ${pm}`);
-    console.log('Installing update...\n');
-
     const result = executeUpdate(pm);
+    if (!result.success) {
+      throw new Error(`Update failed with exit code ${result.exitCode}`);
+    }
 
-    if (result.success) {
-      console.log('\nUpdate successful!');
-
-      // Restart previously running instances
-      if (runningInstances.length > 0) {
-        console.log(`\nRestarting ${runningInstances.length} instance(s)...`);
-        for (const instance of runningInstances) {
-          try {
-            // Force daemon mode for restart after update
-            const restartOptions = {
-              ...instance.storedOptions,
-              daemon: true,
-            };
-            await commands.serve(restartOptions);
-            console.log(`  Restarted instance on port ${instance.port}`);
-          } catch (error) {
-            console.error(`  Failed to restart instance on port ${instance.port}: ${error.message}`);
-            console.log(`  Run manually: openchamber serve --port ${instance.port} --daemon`);
-          }
-        }
+    if (runningInstances.length > 0) {
+      for (const instance of runningInstances) {
+        const storedOptions = readInstanceOptions(instance.instanceFilePath) || { port: instance.port };
+        await this.serve({
+          port: storedOptions.port || instance.port,
+          explicitPort: true,
+          uiPassword: storedOptions.uiPassword,
+        });
       }
-    } else {
-      console.error('\nUpdate failed.');
-      console.error(`Exit code: ${result.exitCode}`);
-      process.exit(1);
     }
   },
-
 };
 
 async function main() {
-  const { command, options, warnings } = parseArgs();
+  const parsed = parseArgs();
+  const { command, subcommand, tunnelAction, options, removedFlagErrors, helpRequested, versionRequested } = parsed;
 
-  if (Array.isArray(warnings) && warnings.length > 0) {
-    for (const warning of warnings) {
-      console.warn(`Warning: ${warning}`);
+  if (versionRequested) {
+    console.log(PACKAGE_JSON.version);
+    return;
+  }
+
+  if (removedFlagErrors.length > 0) {
+    for (const error of removedFlagErrors) {
+      console.error(`Error: ${error}`);
     }
+    process.exit(1);
+  }
+
+  if (helpRequested) {
+    if (command === 'tunnel') {
+      showTunnelHelp();
+    } else {
+      showHelp();
+    }
+    return;
+  }
+
+  if (command === 'tunnel') {
+    await commands.tunnel(options, subcommand, tunnelAction);
+    return;
   }
 
   if (!commands[command]) {
@@ -1361,12 +1769,7 @@ async function main() {
     process.exit(1);
   }
 
-  try {
-    await commands[command](options);
-  } catch (error) {
-    console.error(`Error executing command '${command}': ${error.message}`);
-    process.exit(1);
-  }
+  await commands[command](options);
 }
 
 const isCliExecution = (() => {
@@ -1392,7 +1795,18 @@ if (isCliExecution) {
     process.exit(1);
   });
 
-  main();
+  main().catch((error) => {
+    console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  });
 }
 
-export { commands, parseArgs, getPidFilePath, resolveTunnelProviders, fetchTunnelProvidersFromPort };
+export {
+  commands,
+  parseArgs,
+  getPidFilePath,
+  resolveTunnelProviders,
+  fetchTunnelProvidersFromPort,
+  discoverRunningInstances,
+  ensureTunnelProfilesMigrated,
+};

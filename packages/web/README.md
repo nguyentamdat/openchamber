@@ -29,20 +29,21 @@ bun add -g @openchamber/web    # or npm, pnpm, yarn
 ```bash
 openchamber                          # Start on port 3000
 openchamber --port 8080              # Custom port
-openchamber --daemon                 # Background mode
 openchamber --ui-password secret     # Password-protect UI
-openchamber --tunnel-provider cloudflare --tunnel-mode quick  # Create a Cloudflare Quick Tunnel for remote access
-openchamber --tunnel-provider cloudflare --tunnel-mode managed-local --tunnel-config  # Use default ~/.cloudflared/config.yml
-openchamber --tunnel ~/.cloudflared/config.yml   # Shorthand for managed-local with explicit config path
-openchamber --tunnel-provider cloudflare --tunnel-mode quick --tunnel-qr            # Show QR code for easy mobile access
-openchamber --tunnel-provider cloudflare --tunnel-mode quick --tunnel-password-url   # Include password in URL for auto-login
+openchamber tunnel help              # Tunnel lifecycle commands
+openchamber tunnel providers         # Show provider capabilities
+openchamber tunnel profile add --provider cloudflare --mode managed-remote --name prod-main --hostname app.example.com --token <token>
+openchamber tunnel start --profile prod-main
+openchamber tunnel start --provider cloudflare --mode quick --qr
+openchamber tunnel start --provider cloudflare --mode managed-local --config ~/.cloudflared/config.yml
+openchamber tunnel status --all      # Show tunnel state across instances
+openchamber tunnel stop --port 3000  # Stop tunnel only (server stays running)
+openchamber logs                     # Follow latest instance logs
 OPENCODE_PORT=4096 OPENCODE_SKIP_START=true openchamber                    # Connect to external OpenCode server
 OPENCODE_HOST=https://myhost:4096 OPENCODE_SKIP_START=true openchamber  # Connect via custom host/HTTPS
 openchamber stop                     # Stop server
 openchamber update                   # Update to latest version
 ```
-
-Legacy CLI flag `--try-cf-tunnel` remains supported for backward compatibility and maps to `--tunnel-provider cloudflare --tunnel-mode quick`.
 
 ### Environment Variables
 

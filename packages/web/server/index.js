@@ -7890,6 +7890,11 @@ async function main(options = {}) {
       const normalizedMode = normalizeTunnelMode(settings?.tunnelMode);
       const managedRemoteHostname = normalizeManagedRemoteTunnelHostname(settings?.managedRemoteTunnelHostname);
       const managedRemoteTunnelConfig = await readManagedRemoteTunnelConfigFromDisk();
+      const managedRemoteTunnelPresetSummaries = managedRemoteTunnelConfig.tunnels.map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        hostname: entry.hostname,
+      }));
       const hasStoredManagedRemoteToken = typeof settings?.managedRemoteTunnelToken === 'string' && settings.managedRemoteTunnelToken.trim().length > 0;
       const hasManagedRemoteTunnelToken = runtimeManagedRemoteTunnelToken.length > 0 || managedRemoteTunnelConfig.tunnels.length > 0 || hasStoredManagedRemoteToken;
       const bootstrapTtlMs = settings?.tunnelBootstrapTtlMs === null
@@ -7910,6 +7915,7 @@ async function main(options = {}) {
           providerMetadata: null,
           hasManagedRemoteTunnelToken,
           managedRemoteTunnelHostname: managedRemoteHostname || null,
+          managedRemoteTunnelPresets: managedRemoteTunnelPresetSummaries,
           managedRemoteTunnelTokenPresetIds: managedRemoteTunnelConfig.tunnels.map((entry) => entry.id),
           hasBootstrapToken: false,
           bootstrapExpiresAt: null,
@@ -7939,8 +7945,9 @@ async function main(options = {}) {
          provider,
          providerMetadata,
          hasManagedRemoteTunnelToken,
-        managedRemoteTunnelHostname: managedRemoteHostname || null,
-        managedRemoteTunnelTokenPresetIds: managedRemoteTunnelConfig.tunnels.map((entry) => entry.id),
+         managedRemoteTunnelHostname: managedRemoteHostname || null,
+         managedRemoteTunnelPresets: managedRemoteTunnelPresetSummaries,
+         managedRemoteTunnelTokenPresetIds: managedRemoteTunnelConfig.tunnels.map((entry) => entry.id),
         hasBootstrapToken: bootstrapStatus.hasBootstrapToken,
         bootstrapExpiresAt: bootstrapStatus.bootstrapExpiresAt,
         policy: 'tunnel-gated',

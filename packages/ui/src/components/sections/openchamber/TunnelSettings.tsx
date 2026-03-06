@@ -105,6 +105,7 @@ interface TunnelStatusResponse {
   hasBootstrapToken?: boolean;
   bootstrapExpiresAt?: number | null;
   managedRemoteTunnelTokenPresetIds?: string[];
+  managedRemoteTunnelPresets?: ManagedRemoteTunnelPreset[];
   activeTunnelMode?: ApiTunnelMode | null;
   providerMetadata?: {
     configPath?: string | null;
@@ -394,12 +395,19 @@ export const TunnelSettings: React.FC = () => {
           ? settingsData.managedRemoteTunnelHostname
           : '';
 
-      const loadedPresets = sanitizePresets(settingsData?.managedRemoteTunnelPresets);
-      const presets = loadedPresets.length > 0
-        ? loadedPresets
-        : (loadedHostname
-          ? [{ id: 'legacy-default', name: 'Default', hostname: normalizePresetHostname(loadedHostname) }]
-          : []);
+      const loadedPresetsFromSettings = sanitizePresets(settingsData?.managedRemoteTunnelPresets);
+      const loadedPresetsFromStatus = sanitizePresets(statusData?.managedRemoteTunnelPresets);
+      const presets = loadedPresetsFromSettings.length > 0
+        ? loadedPresetsFromSettings
+        : loadedPresetsFromStatus.length > 0
+          ? loadedPresetsFromStatus
+          : (loadedHostname
+            ? [{
+              id: `legacy-${normalizePresetHostname(loadedHostname)}`,
+              name: loadedHostname,
+              hostname: normalizePresetHostname(loadedHostname),
+            }]
+            : []);
 
       const requestedPresetId = typeof settingsData?.managedRemoteTunnelSelectedPresetId === 'string'
         ? settingsData.managedRemoteTunnelSelectedPresetId.trim()
