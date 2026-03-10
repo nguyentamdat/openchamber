@@ -1148,6 +1148,55 @@ function maskToken(token) {
   return `${'*'.repeat(Math.max(4, token.length - 4))}${token.slice(-4)}`;
 }
 
+const MAX_TOKEN_FILE_BYTES = 8 * 1024;
+
+function readTokenFromFileSafely(tokenFilePath) {
+  const absolutePath = path.resolve(tokenFilePath);
+  let realPath;
+  try {
+    realPath = fs.realpathSync(absolutePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new Error(`Token file '${absolutePath}' not found.`);
+    }
+    if (error?.code === 'EACCES') {
+      throw new Error(`Token file '${absolutePath}' is not readable. Check file permissions.`);
+    }
+    throw error;
+  }
+
+  let stats;
+  try {
+    stats = fs.statSync(realPath);
+  } catch (error) {
+    if (error?.code === 'EACCES') {
+      throw new Error(`Token file '${absolutePath}' is not readable. Check file permissions.`);
+    }
+    throw error;
+  }
+
+  if (!stats.isFile()) {
+    throw new Error(`Token file '${absolutePath}' must be a regular file.`);
+  }
+  if (stats.size <= 0) {
+    throw new Error(`Token file '${absolutePath}' is empty.`);
+  }
+  if (stats.size > MAX_TOKEN_FILE_BYTES) {
+    throw new Error(`Token file '${absolutePath}' is too large (max ${MAX_TOKEN_FILE_BYTES} bytes).`);
+  }
+
+  const raw = fs.readFileSync(realPath, 'utf8');
+  if (raw.includes('\u0000')) {
+    throw new Error(`Token file '${absolutePath}' appears to be binary. Use a plain text token file.`);
+  }
+
+  const value = raw.trim();
+  if (!value) {
+    throw new Error(`Token file '${absolutePath}' is empty.`);
+  }
+  return value;
+}
+
 function resolveToken(options) {
   const sources = [
     options.tokenStdin ? 'stdin' : null,
@@ -1175,22 +1224,7 @@ function resolveToken(options) {
   }
 
   if (options.tokenFile) {
-    const tokenFilePath = path.resolve(options.tokenFile);
-    try {
-      const value = fs.readFileSync(tokenFilePath, 'utf8').trim();
-      if (!value) {
-        throw new Error(`Token file '${tokenFilePath}' is empty.`);
-      }
-      return value;
-    } catch (error) {
-      if (error.code === 'ENOENT') {
-        throw new Error(`Token file '${tokenFilePath}' not found.`);
-      }
-      if (error.code === 'EACCES') {
-        throw new Error(`Token file '${tokenFilePath}' is not readable. Check file permissions.`);
-      }
-      throw error;
-    }
+    return readTokenFromFileSafely(options.tokenFile);
   }
 
   return typeof options.token === 'string' ? options.token.trim() : undefined;
@@ -1519,7 +1553,15 @@ async function resolveAvailablePort(desiredPort, explicitPort = false) {
   if (await isPortAvailable(startPort)) {
     return startPort;
   }
-  console.warn(`Port ${startPort} in use; using a free port`);
+
+  const occupant = await fetchSystemInfoFromPort(startPort);
+  if (occupant?.runtime === 'desktop') {
+    console.warn(`Port ${startPort} is used by OpenChamber Desktop; using a free port`);
+  } else if (occupant?.runtime) {
+    console.warn(`Port ${startPort} is used by an existing OpenChamber instance; using a free port`);
+  } else {
+    console.warn(`Port ${startPort} in use; using a free port`);
+  }
   return 0;
 }
 
@@ -2472,6 +2514,42 @@ const commands = {
     if (options.explicitPort) {
       runningInstances = runningInstances.filter((entry) => entry.port === options.port);
       if (runningInstances.length === 0) {
+        const systemInfo = await fetchSystemInfoFromPort(options.port);
+        if (systemInfo?.runtime === 'desktop') {
+          console.log(`Port ${options.port} is used by OpenChamber Desktop app and cannot be stopped with this command.`);
+          return;
+        }
+
+        if (systemInfo?.runtime) {
+          console.log(`Found unmanaged OpenChamber instance on port ${options.port}. Attempting shutdown...`);
+          const requested = await requestServerShutdown(options.port);
+
+          if (Number.isFinite(systemInfo.pid) && isProcessRunning(systemInfo.pid)) {
+            try {
+              process.kill(systemInfo.pid, 'SIGTERM');
+              let attempts = 0;
+              while (isProcessRunning(systemInfo.pid) && attempts < 20) {
+                await new Promise((resolve) => setTimeout(resolve, 250));
+                attempts++;
+              }
+              if (isProcessRunning(systemInfo.pid)) {
+                process.kill(systemInfo.pid, 'SIGKILL');
+              }
+            } catch {
+            }
+          }
+
+          const stopped = await isPortAvailable(options.port);
+          if (stopped) {
+            console.log(`Stopped OpenChamber on port ${options.port}`);
+          } else if (requested) {
+            console.log(`Shutdown was requested for port ${options.port}, but the port is still occupied.`);
+          } else {
+            console.log(`Could not stop OpenChamber on port ${options.port}.`);
+          }
+          return;
+        }
+
         console.log(`No OpenChamber instance found running on port ${options.port}`);
         return;
       }
@@ -2671,32 +2749,52 @@ const commands = {
 
         let doctorResult = null;
         let doctorError = null;
-        const diagnosticsEntry = getLatestInstance(availableEntries);
-        if (diagnosticsEntry) {
-          try {
-            const query = new URLSearchParams();
-            if (providerOption) query.set('provider', providerOption);
-            if (typeof options.configPath === 'string') query.set('configPath', options.configPath);
-            if (typeof options.hostname === 'string' && options.hostname.trim().length > 0) {
-              query.set('managedRemoteTunnelHostname', options.hostname);
+        const diagnosticsEntries = [...availableEntries].sort((a, b) => b.mtime - a.mtime);
+        if (diagnosticsEntries.length > 0) {
+          const query = new URLSearchParams();
+          if (providerOption) query.set('provider', providerOption);
+          if (typeof options.mode === 'string' && options.mode.trim().length > 0) {
+            query.set('mode', options.mode.trim().toLowerCase());
+          }
+          if (typeof options.configPath === 'string') query.set('configPath', options.configPath);
+          if (typeof options.hostname === 'string' && options.hostname.trim().length > 0) {
+            query.set('managedRemoteTunnelHostname', options.hostname);
+          }
+          const doctorTokenValue = resolveToken(options);
+          if (typeof doctorTokenValue === 'string' && doctorTokenValue.trim().length > 0) {
+            query.set('managedRemoteTunnelToken', doctorTokenValue);
+          }
+
+          const failedPorts = [];
+          for (const diagnosticsEntry of diagnosticsEntries) {
+            try {
+              doctorSpin?.message(`Diagnosing provider on port ${diagnosticsEntry.port}...`);
+              const { response, body } = await requestJson(
+                diagnosticsEntry.port,
+                `/api/openchamber/tunnel/doctor?${query.toString()}`,
+                { timeoutMs: 10000 },
+              );
+              if (response.ok && body?.ok && isValidTunnelDoctorResponse(body)) {
+                doctorResult = body;
+                doctorError = null;
+                break;
+              }
+
+              const looksIncompatible = response.ok && (!body || typeof body !== 'object' || !body.ok);
+              const fallbackError = looksIncompatible
+                ? `port ${diagnosticsEntry.port}: doctor endpoint unavailable or incompatible (restart this CLI instance)`
+                : `port ${diagnosticsEntry.port}: ${body?.error || `doctor ${response.status}`}`;
+              failedPorts.push(fallbackError);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              failedPorts.push(`port ${diagnosticsEntry.port}: ${message}`);
             }
-            const doctorTokenValue = resolveToken(options);
-            if (typeof doctorTokenValue === 'string' && doctorTokenValue.trim().length > 0) {
-              query.set('managedRemoteTunnelToken', doctorTokenValue);
-            }
-            doctorSpin?.message(`Diagnosing provider...`);
-            const { response, body } = await requestJson(
-              diagnosticsEntry.port,
-              `/api/openchamber/tunnel/doctor?${query.toString()}`,
-              { timeoutMs: 10000 },
-            );
-            if (response.ok && body?.ok) {
-              doctorResult = body;
-            } else {
-              doctorError = body?.error || `doctor ${response.status}`;
-            }
-          } catch (error) {
-            doctorError = error instanceof Error ? error.message : String(error);
+          }
+
+          if (!doctorResult) {
+            doctorError = failedPorts.length > 0
+              ? failedPorts[0]
+              : 'No compatible CLI instance found for tunnel doctor.';
           }
         }
 
@@ -2730,10 +2828,17 @@ const commands = {
         for (const entry of cliPorts) {
           logStatus('success', `port ${entry.port} — CLI (available)`);
         }
+        const desktopUnavailablePorts = [];
         for (const entry of unavailablePorts) {
-          logStatus('error', `port ${entry.port} — Desktop (tunneling not supported)`);
+          const isDesktop = typeof entry?.line === 'string' && entry.line.includes('desktop runtime');
+          if (isDesktop) {
+            desktopUnavailablePorts.push(entry.port);
+            logStatus('error', `port ${entry.port} — Desktop (tunneling not supported)`);
+            continue;
+          }
+          logStatus('error', `port ${entry.port} — No running instance`);
         }
-        if (unavailablePorts.length > 0) {
+        if (desktopUnavailablePorts.length > 0) {
           clackLog.message('Only CLI instances (openchamber serve) support tunneling.');
         }
 

@@ -168,6 +168,9 @@ const READY_LOG_PATTERNS = [
   /connected to edge/i,
 ];
 
+const MANAGED_LOCAL_CONFIG_MAX_BYTES = 256 * 1024;
+const MANAGED_LOCAL_CONFIG_ALLOWED_EXTENSIONS = new Set(['.yml', '.yaml', '.json']);
+
 const FATAL_LOG_PATTERNS = [
   /error parsing.*config/i,
   /failed to .*config/i,
@@ -201,6 +204,18 @@ function assertReadableFile(filePath, contextLabel) {
 
   if (!stats.isFile()) {
     throw new Error(`${contextLabel} path is not a file. Select a cloudflared config file.`);
+  }
+
+  const extension = path.extname(filePath).toLowerCase();
+  if (!MANAGED_LOCAL_CONFIG_ALLOWED_EXTENSIONS.has(extension)) {
+    throw new Error(`${contextLabel} must be a .yml, .yaml, or .json file.`);
+  }
+
+  if (stats.size <= 0) {
+    throw new Error(`${contextLabel} file is empty.`);
+  }
+  if (stats.size > MANAGED_LOCAL_CONFIG_MAX_BYTES) {
+    throw new Error(`${contextLabel} file is too large (max ${MANAGED_LOCAL_CONFIG_MAX_BYTES} bytes).`);
   }
 
   try {

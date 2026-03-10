@@ -7860,6 +7860,109 @@ async function main(options = {}) {
     };
   };
 
+  const createGenericModeChecks = ({ modeKey, requiredFields, doctorRequest, startupReady }) => {
+    const checks = [
+      {
+        id: 'startup_readiness',
+        label: 'Provider startup readiness',
+        status: startupReady ? 'pass' : 'fail',
+        detail: startupReady
+          ? 'Provider dependency checks passed.'
+          : 'Resolve provider checks before starting tunnels.',
+      },
+    ];
+
+    for (const field of requiredFields) {
+      const value = doctorRequest?.[field];
+      const present = typeof value === 'string' ? value.trim().length > 0 : Boolean(value);
+      checks.push({
+        id: `requirement_${field}`,
+        label: `Required: ${field}`,
+        status: present ? 'pass' : 'fail',
+        detail: present
+          ? `${field} is configured.`
+          : `${field} is required for ${modeKey}.`,
+      });
+    }
+
+    const failures = checks.filter((entry) => entry.status === 'fail').length;
+    const warnings = checks.filter((entry) => entry.status === 'warn').length;
+    return {
+      mode: modeKey,
+      checks,
+      summary: {
+        ready: failures === 0,
+        failures,
+        warnings,
+      },
+      ready: failures === 0,
+      blockers: checks
+        .filter((entry) => entry.status === 'fail' && entry.id !== 'startup_readiness')
+        .map((entry) => entry.detail || entry.label || entry.id),
+    };
+  };
+
+  const runTunnelDoctor = async ({ providerId, modeFilter, doctorRequest }) => {
+    const provider = tunnelProviderRegistry.get(providerId);
+    if (!provider) {
+      throw new TunnelServiceError('provider_unsupported', `Unsupported tunnel provider: ${providerId}`);
+    }
+
+    const capabilities = provider.capabilities || {};
+    const modeKeys = Array.isArray(capabilities.modes)
+      ? capabilities.modes.map((entry) => entry?.key).filter((key) => typeof key === 'string' && key.length > 0)
+      : [];
+
+    if (modeFilter && !modeKeys.includes(modeFilter)) {
+      throw new TunnelServiceError('mode_unsupported', `Provider '${providerId}' does not support mode '${modeFilter}'`);
+    }
+
+    if (typeof provider.diagnose === 'function') {
+      const diagnosed = await provider.diagnose({
+        ...doctorRequest,
+        mode: modeFilter || doctorRequest?.mode,
+      }, {
+        capabilities,
+      });
+      const providerChecks = Array.isArray(diagnosed?.providerChecks) ? diagnosed.providerChecks : [];
+      const allModes = Array.isArray(diagnosed?.modes) ? diagnosed.modes : [];
+      const modes = modeFilter ? allModes.filter((entry) => entry?.mode === modeFilter) : allModes;
+      return {
+        ok: true,
+        provider: providerId,
+        providerChecks,
+        modes,
+      };
+    }
+
+    const availability = await tunnelService.checkAvailability(providerId);
+    const dependencyAvailable = Boolean(availability?.available);
+    const providerChecks = [{
+      id: 'dependency',
+      label: 'Provider dependency',
+      status: dependencyAvailable ? 'pass' : 'fail',
+      detail: dependencyAvailable
+        ? (availability?.version || 'available')
+        : (availability?.message || 'Required provider dependency is unavailable.'),
+    }];
+
+    const targetModes = (Array.isArray(capabilities.modes) ? capabilities.modes : [])
+      .filter((entry) => !modeFilter || entry?.key === modeFilter);
+    const modes = targetModes.map((entry) => createGenericModeChecks({
+      modeKey: entry.key,
+      requiredFields: Array.isArray(entry?.requires) ? entry.requires : [],
+      doctorRequest,
+      startupReady: dependencyAvailable,
+    }));
+
+    return {
+      ok: true,
+      provider: providerId,
+      providerChecks,
+      modes,
+    };
+  };
+
   // ── Tunnel API ─────────────────────────────────────────────────────
 
   app.get('/api/openchamber/tunnel/check', async (req, res) => {
@@ -7876,6 +7979,71 @@ async function main(options = {}) {
     } catch (error) {
       console.warn('Tunnel dependency check failed:', error);
       res.json({ available: false, provider: null, version: null });
+    }
+  });
+
+  app.get('/api/openchamber/tunnel/doctor', async (req, res) => {
+    try {
+      const providerId = typeof req?.query?.provider === 'string' && req.query.provider.trim().length > 0
+        ? normalizeTunnelProvider(req.query.provider)
+        : await resolvePreferredTunnelProvider();
+      const modeFilter = typeof req?.query?.mode === 'string' && req.query.mode.trim().length > 0
+        ? req.query.mode.trim().toLowerCase()
+        : null;
+
+      const settings = await readSettingsFromDiskMigrated();
+      const selectedPresetId = typeof req?.query?.managedRemoteTunnelPresetId === 'string'
+        ? req.query.managedRemoteTunnelPresetId.trim()
+        : '';
+      const requestConfigPath = normalizeOptionalPath(req?.query?.configPath)
+        ?? normalizeOptionalPath(settings?.managedLocalTunnelConfigPath);
+      const requestManagedRemoteHostname = normalizeManagedRemoteTunnelHostname(req?.query?.managedRemoteTunnelHostname);
+      const requestTunnelHostname = normalizeManagedRemoteTunnelHostname(req?.query?.tunnelHostname);
+      const requestHostname = normalizeManagedRemoteTunnelHostname(req?.query?.hostname);
+      const hostnameFromSettings = normalizeManagedRemoteTunnelHostname(settings?.managedRemoteTunnelHostname);
+      const hostname = requestHostname || requestTunnelHostname || requestManagedRemoteHostname || hostnameFromSettings;
+
+      const requestManagedRemoteToken = typeof req?.query?.managedRemoteTunnelToken === 'string'
+        ? req.query.managedRemoteTunnelToken.trim()
+        : '';
+      const requestTunnelToken = typeof req?.query?.tunnelToken === 'string'
+        ? req.query.tunnelToken.trim()
+        : '';
+      const requestToken = typeof req?.query?.token === 'string'
+        ? req.query.token.trim()
+        : '';
+      const storedManagedRemoteToken = typeof settings?.managedRemoteTunnelToken === 'string'
+        ? settings.managedRemoteTunnelToken.trim()
+        : '';
+      const configManagedRemoteToken = providerId === TUNNEL_PROVIDER_CLOUDFLARE
+        ? await resolveManagedRemoteTunnelToken({ presetId: selectedPresetId, hostname })
+        : '';
+      const token = requestToken
+        || requestTunnelToken
+        || requestManagedRemoteToken
+        || ((runtimeManagedRemoteTunnelHostname && hostname && runtimeManagedRemoteTunnelHostname === hostname) ? runtimeManagedRemoteTunnelToken : '')
+        || configManagedRemoteToken
+        || storedManagedRemoteToken;
+
+      const doctorRequest = {
+        mode: modeFilter,
+        hostname,
+        token,
+        configPath: requestConfigPath,
+      };
+
+      const result = await runTunnelDoctor({
+        providerId,
+        modeFilter,
+        doctorRequest,
+      });
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof TunnelServiceError) {
+        return res.status(400).json({ ok: false, error: error.message, code: error.code });
+      }
+      console.warn('Tunnel doctor failed:', error);
+      return res.status(500).json({ ok: false, error: 'Failed to run tunnel doctor' });
     }
   });
 

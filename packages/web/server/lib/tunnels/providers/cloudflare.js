@@ -1,5 +1,8 @@
 import {
+  checkCloudflareApiReachability,
   checkCloudflaredAvailable,
+  inspectManagedLocalCloudflareConfig,
+  normalizeCloudflareTunnelHostname,
   startCloudflareManagedLocalTunnel,
   startCloudflareManagedRemoteTunnel,
   startCloudflareQuickTunnel,
@@ -50,6 +53,44 @@ export const cloudflareTunnelProviderCapabilities = {
 };
 
 export function createCloudflareTunnelProvider() {
+  const validateTokenShape = (value) => {
+    if (typeof value !== 'string') {
+      return { ok: false, detail: 'Managed remote token is missing.' };
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return { ok: false, detail: 'Managed remote token is missing.' };
+    }
+    if (/\s/.test(trimmed)) {
+      return { ok: false, detail: 'Managed remote token has whitespace; provide the raw token value.' };
+    }
+    return { ok: true, detail: 'Managed remote token looks valid.' };
+  };
+
+  const createModeSummary = (checks) => {
+    const failures = checks.filter((entry) => entry.status === 'fail').length;
+    const warnings = checks.filter((entry) => entry.status === 'warn').length;
+    return {
+      ready: failures === 0,
+      failures,
+      warnings,
+    };
+  };
+
+  const describeMode = ({ mode, checks }) => {
+    const summary = createModeSummary(checks);
+    const blockers = checks
+      .filter((entry) => entry.status === 'fail' && entry.id !== 'startup_readiness')
+      .map((entry) => entry.detail || entry.label || entry.id);
+    return {
+      mode,
+      checks,
+      summary,
+      ready: summary.ready,
+      blockers,
+    };
+  };
+
   return {
     id: TUNNEL_PROVIDER_CLOUDFLARE,
     capabilities: cloudflareTunnelProviderCapabilities,
@@ -61,6 +102,113 @@ export function createCloudflareTunnelProvider() {
       return {
         ...result,
         message: 'cloudflared is not installed. Install it with: brew install cloudflared',
+      };
+    },
+    diagnose: async (request = {}) => {
+      const dependency = await checkCloudflaredAvailable();
+      const network = await checkCloudflareApiReachability();
+
+      const providerChecks = [
+        {
+          id: 'dependency',
+          label: 'cloudflared installed',
+          status: dependency.available ? 'pass' : 'fail',
+          detail: dependency.available
+            ? (dependency.version || dependency.path || 'cloudflared available')
+            : 'cloudflared is not installed. Install it with: brew install cloudflared',
+        },
+        {
+          id: 'network',
+          label: 'Cloudflare API reachable',
+          status: network.reachable ? 'pass' : 'fail',
+          detail: network.reachable
+            ? (network.status ? `HTTP ${network.status}` : 'Reachable')
+            : (network.error || 'Could not reach api.trycloudflare.com'),
+        },
+      ];
+
+      const startupReady = dependency.available && network.reachable;
+      const startupDetail = startupReady
+        ? 'Provider dependency and network checks passed.'
+        : 'Resolve provider checks before starting tunnels.';
+
+      const quickChecks = [
+        {
+          id: 'startup_readiness',
+          label: 'Provider startup readiness',
+          status: startupReady ? 'pass' : 'fail',
+          detail: startupDetail,
+        },
+        {
+          id: 'quick_mode_prerequisites',
+          label: 'Quick tunnel prerequisites',
+          status: network.reachable ? 'pass' : 'fail',
+          detail: network.reachable
+            ? 'Cloudflare edge is reachable for quick tunnels.'
+            : 'Cloudflare edge is not reachable for quick tunnels.',
+        },
+      ];
+
+      const managedLocalInspection = inspectManagedLocalCloudflareConfig({
+        configPath: request.configPath,
+        hostname: request.hostname,
+      });
+      const managedLocalChecks = [
+        {
+          id: 'startup_readiness',
+          label: 'Provider startup readiness',
+          status: startupReady ? 'pass' : 'fail',
+          detail: startupDetail,
+        },
+        {
+          id: 'managed_local_config',
+          label: 'Managed local config',
+          status: managedLocalInspection.ok ? 'pass' : 'fail',
+          detail: managedLocalInspection.ok
+            ? `${managedLocalInspection.effectiveConfigPath}${managedLocalInspection.resolvedHostname ? ` (${managedLocalInspection.resolvedHostname})` : ''}`
+            : managedLocalInspection.error,
+        },
+      ];
+
+      const normalizedHost = normalizeCloudflareTunnelHostname(request.hostname);
+      const remoteTokenValidation = validateTokenShape(request.token);
+      const managedRemoteChecks = [
+        {
+          id: 'startup_readiness',
+          label: 'Provider startup readiness',
+          status: startupReady ? 'pass' : 'fail',
+          detail: startupDetail,
+        },
+        {
+          id: 'managed_remote_hostname',
+          label: 'Managed remote hostname',
+          status: normalizedHost ? 'pass' : 'fail',
+          detail: normalizedHost
+            ? normalizedHost
+            : 'Managed remote hostname is required (use --hostname).',
+        },
+        {
+          id: 'managed_remote_token',
+          label: 'Managed remote token',
+          status: remoteTokenValidation.ok ? 'pass' : 'fail',
+          detail: remoteTokenValidation.detail,
+        },
+      ];
+
+      const allModes = [
+        describeMode({ mode: TUNNEL_MODE_QUICK, checks: quickChecks }),
+        describeMode({ mode: TUNNEL_MODE_MANAGED_REMOTE, checks: managedRemoteChecks }),
+        describeMode({ mode: TUNNEL_MODE_MANAGED_LOCAL, checks: managedLocalChecks }),
+      ];
+
+      const modeFilter = typeof request.mode === 'string' && request.mode.trim().length > 0
+        ? request.mode.trim().toLowerCase()
+        : null;
+      const modes = modeFilter ? allModes.filter((entry) => entry.mode === modeFilter) : allModes;
+
+      return {
+        providerChecks,
+        modes,
       };
     },
     start: async (request, context = {}) => {

@@ -233,6 +233,28 @@ describe('cli tunnel doctor response validation', () => {
   });
 });
 
+describe('resolveToken file safeguards', () => {
+  it('rejects non-file token path', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-token-path-'));
+    try {
+      expect(() => resolveToken({ tokenFile: tempDir })).toThrow(/must be a regular file/);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects oversized token files', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-token-size-'));
+    const tokenPath = path.join(tempDir, 'token.txt');
+    try {
+      fs.writeFileSync(tokenPath, 'a'.repeat(9 * 1024), 'utf8');
+      expect(() => resolveToken({ tokenFile: tokenPath })).toThrow(/too large/);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('cli tunnel provider discovery', () => {
   it('uses provider capabilities from local api when available', async () => {
     const fetchImpl = async () => ({
