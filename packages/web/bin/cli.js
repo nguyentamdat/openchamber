@@ -2699,6 +2699,8 @@ const commands = {
       serverArgs.push('--ui-password', effectiveUiPassword);
     }
 
+    const serveSpin = showOutput ? createSpinner(options) : null;
+
     const child = spawn(runtimeBin, serverArgs, {
       detached: true,
       stdio: ['ignore', logFd, logFd, 'ipc'],
@@ -2712,6 +2714,7 @@ const commands = {
     });
 
     child.unref();
+    serveSpin?.start(`Starting OpenChamber on port ${targetPort === 0 ? 'auto' : targetPort}...`);
 
     const resolvedPort = await new Promise((resolve) => {
       let settled = false;
@@ -2759,6 +2762,7 @@ const commands = {
     }
 
     if (!isProcessRunning(child.pid)) {
+      serveSpin?.error('Failed to start OpenChamber');
       throw new Error('Failed to start server in daemon mode');
     }
 
@@ -2786,6 +2790,8 @@ const commands = {
       process.stdout.write(`${resolvedPort}\n`);
       return resolvedPort;
     }
+
+    serveSpin?.clear();
 
     if (!options.suppressStartupSummary && showOutput) {
       clackIntro('OpenChamber Started');
@@ -2856,9 +2862,11 @@ const commands = {
         }
 
         if (systemInfo?.runtime) {
-          if (showOutput) {
+          const unmanagedStopSpin = showOutput ? createSpinner(options) : null;
+          if (showOutput && !unmanagedStopSpin) {
             logStatus('info', `found unmanaged OpenChamber instance on port ${options.port}`, 'attempting shutdown');
           }
+          unmanagedStopSpin?.start(`Stopping unmanaged OpenChamber on port ${options.port}...`);
           const requested = await requestServerShutdown(options.port);
 
           if (Number.isFinite(systemInfo.pid) && isProcessRunning(systemInfo.pid)) {
@@ -2878,16 +2886,18 @@ const commands = {
 
           const stopped = await isPortAvailable(options.port);
           if (stopped) {
+            unmanagedStopSpin?.stop(`Stopped unmanaged OpenChamber on port ${options.port}`);
             jsonResults.push({ port: options.port, runtime: 'unmanaged', stopped: true });
             if (isJsonMode(options)) {
               printJson({ stoppedCount: 1, results: jsonResults });
             }
-            if (showOutput) {
+            if (showOutput && !unmanagedStopSpin) {
               logStatus('success', `stopped OpenChamber on port ${options.port}`);
               finish('stop complete');
             }
             printQuietStopResults();
           } else if (requested) {
+            unmanagedStopSpin?.stop(`Shutdown requested on port ${options.port} (still occupied)`);
             jsonResults.push({ port: options.port, runtime: 'unmanaged', stopped: false, reason: 'shutdown-requested-port-busy' });
             if (isJsonMode(options)) {
               printJson({
@@ -2897,12 +2907,13 @@ const commands = {
                 messages: [{ level: 'warning', code: 'SHUTDOWN_PARTIAL', message: `Shutdown was requested for port ${options.port}, but the port is still occupied.` }],
               });
             }
-            if (showOutput) {
+            if (showOutput && !unmanagedStopSpin) {
               logStatus('warning', `shutdown requested on port ${options.port}`, 'port is still occupied');
               finish('partial stop');
             }
             printQuietStopResults();
           } else {
+            unmanagedStopSpin?.error(`Could not stop OpenChamber on port ${options.port}`);
             jsonResults.push({ port: options.port, runtime: 'unmanaged', stopped: false, reason: 'stop-failed' });
             if (isJsonMode(options)) {
               printJson({
@@ -2912,7 +2923,7 @@ const commands = {
                 messages: [{ level: 'error', code: 'STOP_FAILED', message: `Could not stop OpenChamber on port ${options.port}.` }],
               });
             }
-            if (showOutput) {
+            if (showOutput && !unmanagedStopSpin) {
               logStatus('error', `could not stop OpenChamber on port ${options.port}`);
               finish('failed');
             }
@@ -2935,9 +2946,11 @@ const commands = {
     }
 
     for (const instance of runningInstances) {
-      if (showOutput) {
+      const stopSpin = showOutput ? createSpinner(options) : null;
+      if (showOutput && !stopSpin) {
         logStatus('info', `stopping port ${instance.port} (PID: ${instance.pid})`);
       }
+      stopSpin?.start(`Stopping OpenChamber on port ${instance.port}...`);
       try {
         await requestServerShutdown(instance.port);
         process.kill(instance.pid, 'SIGTERM');
@@ -2951,11 +2964,13 @@ const commands = {
         }
         removePidFile(instance.pidFilePath);
         removeInstanceFile(instance.instanceFilePath);
+        stopSpin?.stop(`Stopped OpenChamber on port ${instance.port}`);
         jsonResults.push({ port: instance.port, pid: instance.pid, stopped: true });
-        if (showOutput) {
+        if (showOutput && !stopSpin) {
           logStatus('success', `stopped port ${instance.port}`);
         }
       } catch (error) {
+        stopSpin?.error(`Failed to stop OpenChamber on port ${instance.port}`);
         jsonResults.push({ port: instance.port, pid: instance.pid, stopped: false, reason: error instanceof Error ? error.message : String(error) });
         if (showOutput) {
           logStatus('error', `error stopping port ${instance.port}`, error.message);
@@ -3057,19 +3072,33 @@ const commands = {
       discoverDesktopInstance(),
     ]);
 
+    const toPasswordProtectionLabel = (value) => {
+      if (value === true) return 'yes';
+      if (value === false) return 'no';
+      return 'unknown';
+    };
+
     const desktopOnly = desktopInstance && !runningInstances.some((entry) => entry.port === desktopInstance.port)
       ? {
           runtime: 'desktop',
           port: desktopInstance.port,
           pid: Number.isFinite(desktopInstance.pid) ? desktopInstance.pid : null,
+          passwordProtected: null,
         }
       : null;
 
-    const cliInstances = runningInstances.map((instance) => ({
-      runtime: 'cli',
-      port: instance.port,
-      pid: instance.pid,
-    }));
+    const cliInstances = runningInstances.map((instance) => {
+      const storedOptions = readInstanceOptions(instance.instanceFilePath) || {};
+      const passwordProtected = storedOptions.hasUiPassword === true
+        || (typeof storedOptions.uiPassword === 'string' && storedOptions.uiPassword.trim().length > 0);
+
+      return {
+        runtime: 'cli',
+        port: instance.port,
+        pid: instance.pid,
+        passwordProtected,
+      };
+    });
 
     const instances = desktopOnly ? [...cliInstances, desktopOnly] : cliInstances;
     const runningCount = instances.length;
@@ -3084,7 +3113,16 @@ const commands = {
     }
 
     if (isQuietMode(options)) {
-      process.stdout.write(`${runningCount > 0 ? 'running' : 'stopped'}\n`);
+      if (runningCount === 0) {
+        process.stdout.write('stopped\n');
+        return;
+      }
+
+      for (const instance of instances) {
+        process.stdout.write(
+          `port ${instance.port} pass:${toPasswordProtectionLabel(instance.passwordProtected)}\n`
+        );
+      }
       return;
     }
 
@@ -3098,10 +3136,11 @@ const commands = {
 
     for (const instance of instances) {
       const pidSuffix = Number.isFinite(instance.pid) ? ` (PID: ${instance.pid})` : '';
+      const protectionDetail = `password: ${toPasswordProtectionLabel(instance.passwordProtected)}`;
       if (instance.runtime === 'desktop') {
-        logStatus('info', `desktop app on port ${instance.port}${pidSuffix}`);
+        logStatus('info', `desktop app on port ${instance.port}${pidSuffix}`, protectionDetail);
       } else {
-        logStatus('success', `port ${instance.port}${pidSuffix}`);
+        logStatus('success', `port ${instance.port}${pidSuffix}`, protectionDetail);
       }
     }
 
@@ -4148,16 +4187,21 @@ const commands = {
 
         const results = [];
         for (const entry of entries) {
+          const tunnelStopSpin = shouldRenderHumanOutput(options) ? createSpinner(options) : null;
+          tunnelStopSpin?.start(`Stopping tunnel on port ${entry.port}...`);
           try {
             const { response, body } = await requestJson(entry.port, '/api/openchamber/tunnel/stop', {
               method: 'POST',
             });
             if (!response.ok) {
+              tunnelStopSpin?.error(`Failed to stop tunnel on port ${entry.port}`);
               results.push({ port: entry.port, error: body?.error || `stop ${response.status}` });
               continue;
             }
+            tunnelStopSpin?.stop(`Stopped tunnel on port ${entry.port}`);
             results.push({ port: entry.port, result: body });
           } catch (error) {
+            tunnelStopSpin?.error(`Failed to stop tunnel on port ${entry.port}`);
             results.push({ port: entry.port, error: error instanceof Error ? error.message : String(error) });
           }
         }

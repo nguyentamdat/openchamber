@@ -89,6 +89,11 @@ Keep this layer minimal. Do not hide core validation or command semantics inside
 - Action commands: emit one minimal success line and concise errors.
 - Do not suppress required outcomes entirely.
 
+Quiet output should still be complete enough for scripts and quick human scanning.
+
+- Status-like commands should list all active items, not only `running`/`ok`.
+- Prefer compact stable key tokens in quiet lines (for example `port 3000 pass:yes`).
+
 ### `--json` contract (strict)
 
 - Output must be JSON only (no extra text before/after payload).
@@ -101,6 +106,20 @@ Keep this layer minimal. Do not hide core validation or command semantics inside
 
 - If human flow uses `intro`, close with `outro` (or `outro('')` when you want structure without text).
 - Avoid orphan frame/spinner artifacts (prefer `spinner.clear()` when a trailing spinner line is not wanted).
+- If a structured summary section immediately follows a spinner, prefer `spinner.clear()` to avoid duplicate success lines.
+
+### Progress feedback for visible operations
+
+- For operations users wait on (start/stop/restart/tunnel lifecycle), show in-progress spinner in interactive mode.
+- Resolve each spinner explicitly to done/error so users can see completion state at the same visual location.
+- Keep quiet/json modes non-animated.
+
+### Prompt flow design
+
+- Ask required inputs in dependency order (for example hostname before token when token depends on chosen host/mode context).
+- When offering save-vs-run flows, ask intent before collecting optional metadata (for example profile name only if user chooses save).
+- Prefill editable values with `initialValue` (not only `placeholder`) so users can accept or edit quickly.
+- Reuse latest relevant values when safe (for example last managed-local config path, last managed-remote hostname).
 
 ### Readability on narrow terminals
 
