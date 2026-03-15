@@ -88,7 +88,6 @@ async function checkForUpdatesFromApi(currentVersion, options = {}) {
       arch: normalizeArch(options.arch),
       channel: 'stable',
       currentVersion,
-      appVersion: currentVersion,
       installId: getOrCreateInstallId(appType),
       instanceMode: options.instanceMode || 'unknown',
       reportUsage: options.reportUsage !== false,

@@ -2944,7 +2944,6 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
             arch: mapNodeArchToApiArch(os.arch()),
             channel: 'stable',
             currentVersion,
-            appVersion: currentVersion,
             installId,
             instanceMode,
             reportUsage,
