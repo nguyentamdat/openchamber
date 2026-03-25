@@ -5,6 +5,7 @@ This module provides server-side Text-to-Speech services using OpenAI's TTS API,
 
 ## Entrypoints and structure
 - `packages/web/server/lib/tts/index.js`: Public entrypoint imported by `packages/web/server/index.js`.
+- `packages/web/server/lib/tts/routes.js`: Express route registration for `/api/voice/*` and `/api/tts/*` endpoints.
 - `packages/web/server/lib/tts/service.js`: TTS service implementation with OpenAI integration.
 - `packages/web/server/lib/tts/summarization.js`: Text summarization and sanitization utilities using opencode.ai zen API.
 
