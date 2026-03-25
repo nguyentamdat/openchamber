@@ -1095,8 +1095,12 @@ const AssistantMessageBody: React.FC<Omit<MessageBodyProps, 'isUser'>> = ({
     }, [activityPartsForTurn]);
 
     const toggleActivityGroup = turnGroupingContext?.toggleGroup;
+    const isActivityOwnerMessage = !isSortedRenderMode
+        || !turnGroupingContext?.activityOwnerMessageId
+        || turnGroupingContext.activityOwnerMessageId === messageId;
 
     const shouldRenderActivityGroup = isSortedRenderMode
+        && isActivityOwnerMessage
         && activityGroupSegmentsForMessage.length > 0
         && Boolean(toggleActivityGroup);
 
@@ -1211,8 +1215,13 @@ const AssistantMessageBody: React.FC<Omit<MessageBodyProps, 'isUser'>> = ({
                 const toolPart = part as ToolPartType;
                 const toolName = toolPart.tool?.toLowerCase() ?? '';
 
+                if (isSortedRenderMode && !isActivityOwnerMessage) {
+                    i += 1;
+                    continue;
+                }
+
                 const activity = activityByPart.get(part);
-                if (activity?.kind === 'tool' && !isStandaloneTool(toolName)) {
+                if (activity?.kind === 'tool' && (shouldRenderActivityGroup || !isStandaloneTool(toolName))) {
                     i += 1;
                     continue;
                 }
@@ -1284,6 +1293,7 @@ const AssistantMessageBody: React.FC<Omit<MessageBodyProps, 'isUser'>> = ({
         expandedTools,
         hasStopFinish,
         isMobile,
+        isActivityOwnerMessage,
         isSortedRenderMode,
         messageId,
         sessionId,

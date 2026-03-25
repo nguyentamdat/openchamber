@@ -125,6 +125,7 @@ interface ChatMessageProps {
     animationHandlers?: AnimationHandlers;
     scrollToBottom?: (options?: { instant?: boolean; force?: boolean }) => void;
     turnGroupingContext?: TurnGroupingContext;
+    assistantHeaderMessageId?: string;
     animateUserOnMount?: boolean;
     onUserAnimationConsumed?: (messageId: string) => void;
 }
@@ -136,6 +137,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     onContentChange,
     animationHandlers,
     turnGroupingContext,
+    assistantHeaderMessageId,
     animateUserOnMount = false,
     onUserAnimationConsumed,
 }) => {
@@ -626,7 +628,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     }, [message.info.id]);
 
     React.useEffect(() => {
-        const headerMessageId = turnGroupingContext?.headerMessageId;
+        const headerMessageId = assistantHeaderMessageId ?? turnGroupingContext?.headerMessageId;
         if (isUser || !headerMessageId || headerMessageId !== message.info.id) {
             return;
         }
@@ -635,13 +637,13 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
         if (isCurrentlyStreaming) {
             setHasStartedStreamingHeader(true);
         }
-    }, [isUser, message.info.id, streamPhase, turnGroupingContext?.headerMessageId]);
+    }, [assistantHeaderMessageId, isUser, message.info.id, streamPhase, turnGroupingContext?.headerMessageId]);
 
     const shouldShowHeader = React.useMemo(() => {
         if (isUser) return true;
 
         // Use turn grouping context if available for more precise control
-        const headerMessageId = turnGroupingContext?.headerMessageId;
+        const headerMessageId = assistantHeaderMessageId ?? turnGroupingContext?.headerMessageId;
         if (headerMessageId) {
             // For turn grouping: only show header for the first assistant message in the turn
             const isFirstAssistantInTurn = message.info.id === headerMessageId;
@@ -663,7 +665,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
         // Ungrouped fallback path: always show assistant header.
         return true;
-    }, [hasStartedStreamingHeader, isUser, turnGroupingContext, streamPhase, message.info.id]);
+    }, [assistantHeaderMessageId, hasStartedStreamingHeader, isUser, turnGroupingContext, streamPhase, message.info.id]);
 
     const handleCopyCode = React.useCallback((code: string) => {
         void copyTextToClipboard(code).then((result) => {
@@ -1158,6 +1160,7 @@ export default React.memo(ChatMessage, (prev, next) => {
         && areOptionalRenderRelevantMessagesEqual(prev.nextMessage, next.nextMessage)
         && prev.onContentChange === next.onContentChange
         && prev.turnGroupingContext === next.turnGroupingContext
+        && prev.assistantHeaderMessageId === next.assistantHeaderMessageId
         && prev.animateUserOnMount === next.animateUserOnMount
         && prev.onUserAnimationConsumed === next.onUserAnimationConsumed;
 });

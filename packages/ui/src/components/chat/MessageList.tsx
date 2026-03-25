@@ -335,6 +335,7 @@ interface MessageRowProps {
     previousMessage?: ChatMessageEntry;
     nextMessage?: ChatMessageEntry;
     turnGroupingContext?: TurnGroupingContext;
+    assistantHeaderMessageId?: string;
     animateUserOnMount?: boolean;
     onUserAnimationConsumed?: (messageId: string) => void;
     onContentChange: (reason?: ContentChangeReason) => void;
@@ -347,6 +348,7 @@ const MessageRow = React.memo<MessageRowProps>(({
     previousMessage,
     nextMessage,
     turnGroupingContext,
+    assistantHeaderMessageId,
     animateUserOnMount,
     onUserAnimationConsumed,
     onContentChange,
@@ -364,6 +366,7 @@ const MessageRow = React.memo<MessageRowProps>(({
             animationHandlers={animationHandlers}
             scrollToBottom={scrollToBottom}
             turnGroupingContext={turnGroupingContext}
+            assistantHeaderMessageId={assistantHeaderMessageId}
         />
     );
 }, (prev, next) => {
@@ -380,11 +383,13 @@ const MessageRow = React.memo<MessageRowProps>(({
         && prevTurn?.turnId === nextTurn?.turnId
         && prevTurn?.isFirstAssistantInTurn === nextTurn?.isFirstAssistantInTurn
         && prevTurn?.isLastAssistantInTurn === nextTurn?.isLastAssistantInTurn
+        && prevTurn?.activityOwnerMessageId === nextTurn?.activityOwnerMessageId
         && prevTurn?.isWorking === nextTurn?.isWorking
         && prevTurn?.isGroupExpanded === nextTurn?.isGroupExpanded
         && prevTurn?.toggleGroup === nextTurn?.toggleGroup
         && prevTurn?.activityGroupSegments === nextTurn?.activityGroupSegments
         && prevTurn?.activityParts === nextTurn?.activityParts
+        && prev.assistantHeaderMessageId === next.assistantHeaderMessageId
         && prev.animationHandlers?.onChunk === next.animationHandlers?.onChunk
         && prev.animationHandlers?.onComplete === next.animationHandlers?.onComplete
         && prev.animationHandlers?.onStreamingCandidate === next.animationHandlers?.onStreamingCandidate
@@ -532,24 +537,49 @@ const TurnBlock: React.FC<TurnBlockProps> = ({
 
     const renderMessage = React.useCallback(
         (message: ChatMessageEntry) => {
+            const messageRole = resolveMessageRole(message);
+            const isUserMessage = messageRole === 'user';
             const messageIndex = messageOrder.lookup.get(message.info.id);
-            const previousMessage = typeof messageIndex === 'number' && messageIndex > 0
-                ? messageOrder.ordered[messageIndex - 1]
-                : undefined;
-            const nextMessage = typeof messageIndex === 'number' && messageIndex < messageOrder.ordered.length - 1
-                ? messageOrder.ordered[messageIndex + 1]
-                : undefined;
-
             const assistantIndex = visibleAssistantIds.get(message.info.id) ?? -1;
+            const isAssistantMessage = assistantIndex >= 0;
+            const isFirstAssistant = assistantIndex === 0;
+            const isLastAssistant = assistantIndex === visibleAssistantMessages.length - 1;
+            const activityOwnerMessageId = visibleAssistantMessages[0]?.info.id;
+            const isActivityOwner = Boolean(activityOwnerMessageId) && message.info.id === activityOwnerMessageId;
+            const shouldAttachFullTurnContext = isFirstAssistant || isLastAssistant || isActivityOwner;
+            const assistantHeaderMessageId = visibleAssistantMessages[0]?.info.id ?? turn.headerMessageId;
 
-            const turnGroupingContext = assistantIndex >= 0
+            const previousMessage = isUserMessage
+                ? undefined
+                : (isAssistantMessage
+                    ? (isFirstAssistant
+                        ? turn.userMessage
+                        : undefined)
+                    : (typeof messageIndex === 'number' && messageIndex > 0
+                        ? messageOrder.ordered[messageIndex - 1]
+                        : undefined));
+            const nextMessage = undefined;
+
+            const turnGroupingContext = isAssistantMessage
                 ? {
-                    ...turnGroupingContextBase,
-                    isFirstAssistantInTurn: assistantIndex === 0,
-                    isLastAssistantInTurn: assistantIndex === visibleAssistantMessages.length - 1,
+                    turnId: turn.turnId,
+                    activityOwnerMessageId,
+                    isFirstAssistantInTurn: isFirstAssistant,
+                    isLastAssistantInTurn: isLastAssistant,
                     isWorking: isLastTurn && sessionIsWorking,
-                    isGroupExpanded: turnUiState.isExpanded,
-                    toggleGroup: () => onToggleTurnGroup(turn.turnId),
+                    hasTools: turn.hasTools,
+                    hasReasoning: turn.hasReasoning,
+                    ...(shouldAttachFullTurnContext ? {
+                        summaryBody: turnGroupingContextBase.summaryBody,
+                        activityParts: turnGroupingContextBase.activityParts,
+                        activityGroupSegments: turnGroupingContextBase.activityGroupSegments,
+                        headerMessageId: turnGroupingContextBase.headerMessageId,
+                        diffStats: turnGroupingContextBase.diffStats,
+                        userMessageCreatedAt: turnGroupingContextBase.userMessageCreatedAt,
+                        userMessageVariant: turnGroupingContextBase.userMessageVariant,
+                        isGroupExpanded: turnUiState.isExpanded,
+                        toggleGroup: () => onToggleTurnGroup(turn.turnId),
+                    } : {}),
                 } satisfies TurnGroupingContext
                 : undefined;
 
@@ -560,6 +590,7 @@ const TurnBlock: React.FC<TurnBlockProps> = ({
                     previousMessage={previousMessage}
                     nextMessage={nextMessage}
                     turnGroupingContext={turnGroupingContext}
+                    assistantHeaderMessageId={assistantHeaderMessageId}
                     animateUserOnMount={shouldAnimateUserMessage(message)}
                     onUserAnimationConsumed={onUserAnimationConsumed}
                     onContentChange={onMessageContentChange}
@@ -576,7 +607,11 @@ const TurnBlock: React.FC<TurnBlockProps> = ({
             onMessageContentChange,
             scrollToBottom,
             sessionIsWorking,
+            turn.headerMessageId,
+            turn.hasReasoning,
+            turn.hasTools,
             turn.turnId,
+            turn.userMessage,
             turnUiState.isExpanded,
             turnGroupingContextBase,
             visibleAssistantMessages,
