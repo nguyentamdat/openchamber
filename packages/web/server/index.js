@@ -36,6 +36,7 @@ import { createTerminalRuntime } from './lib/terminal/runtime.js';
 import { registerFsRoutes } from './lib/fs/routes.js';
 import { createFsSearchRuntime } from './lib/fs/search.js';
 import { registerOpenCodeRoutes } from './lib/opencode/routes.js';
+import { registerNotificationRoutes } from './lib/notifications/routes.js';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -7035,248 +7036,31 @@ async function main(options = {}) {
     }
   });
 
-  const parsePushSubscribeBody = (body) => {
-    if (!body || typeof body !== 'object') return null;
-    const endpoint = body.endpoint;
-    const keys = body.keys;
-    const p256dh = keys?.p256dh;
-    const auth = keys?.auth;
-
-    if (typeof endpoint !== 'string' || endpoint.trim().length === 0) return null;
-    if (typeof p256dh !== 'string' || p256dh.trim().length === 0) return null;
-    if (typeof auth !== 'string' || auth.trim().length === 0) return null;
-
-    return {
-      endpoint: endpoint.trim(),
-      keys: { p256dh: p256dh.trim(), auth: auth.trim() },
-    };
-  };
-
-  const parsePushUnsubscribeBody = (body) => {
-    if (!body || typeof body !== 'object') return null;
-    const endpoint = body.endpoint;
-    if (typeof endpoint !== 'string' || endpoint.trim().length === 0) return null;
-    return { endpoint: endpoint.trim() };
-  };
-
-  app.get('/api/push/vapid-public-key', async (req, res) => {
-    try {
-      await ensurePushInitialized();
-      const keys = await getOrCreateVapidKeys();
-      res.json({ publicKey: keys.publicKey });
-    } catch (error) {
-      console.warn('[Push] Failed to load VAPID key:', error);
-      res.status(500).json({ error: 'Failed to load push key' });
-    }
-  });
-
-  app.post('/api/push/subscribe', async (req, res) => {
-    await ensurePushInitialized();
-
-    const uiToken = uiAuthController?.ensureSessionToken
-      ? await uiAuthController.ensureSessionToken(req, res)
-      : getUiSessionTokenFromRequest(req);
-    if (!uiToken) {
-      return res.status(401).json({ error: 'UI session missing' });
-    }
-
-    const parsed = parsePushSubscribeBody(req.body);
-    if (!parsed) {
-      return res.status(400).json({ error: 'Invalid body' });
-    }
-
-    const { endpoint, keys } = parsed;
-
-    const origin = typeof req.body?.origin === 'string' ? req.body.origin.trim() : '';
-    if (origin.startsWith('http://') || origin.startsWith('https://')) {
-      try {
-        const settings = await readSettingsFromDiskMigrated();
-        if (typeof settings?.publicOrigin !== 'string' || settings.publicOrigin.trim().length === 0) {
-          await writeSettingsToDisk({
-            ...settings,
-            publicOrigin: origin,
-          });
-          // allow next sends to pick it up
-          pushInitialized = false;
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    await addOrUpdatePushSubscription(
-      uiToken,
-      {
-        endpoint,
-        p256dh: keys.p256dh,
-        auth: keys.auth,
-      },
-      req.headers['user-agent']
-    );
-
-    res.json({ ok: true });
-  });
-
-
-  app.delete('/api/push/subscribe', async (req, res) => {
-    await ensurePushInitialized();
-
-    const uiToken = uiAuthController?.ensureSessionToken
-      ? await uiAuthController.ensureSessionToken(req, res)
-      : getUiSessionTokenFromRequest(req);
-    if (!uiToken) {
-      return res.status(401).json({ error: 'UI session missing' });
-    }
-
-    const parsed = parsePushUnsubscribeBody(req.body);
-    if (!parsed) {
-      return res.status(400).json({ error: 'Invalid body' });
-    }
-
-    await removePushSubscription(uiToken, parsed.endpoint);
-    res.json({ ok: true });
-  });
-
-  app.post('/api/push/visibility', async (req, res) => {
-    const uiToken = uiAuthController?.ensureSessionToken
-      ? await uiAuthController.ensureSessionToken(req, res)
-      : getUiSessionTokenFromRequest(req);
-    if (!uiToken) {
-      return res.status(401).json({ error: 'UI session missing' });
-    }
-
-    const visible = req.body && typeof req.body === 'object' ? req.body.visible : null;
-    updateUiVisibility(uiToken, visible === true);
-    res.json({ ok: true });
-  });
-
-  app.get('/api/push/visibility', (req, res) => {
-    const uiToken = getUiSessionTokenFromRequest(req);
-    if (!uiToken) {
-      return res.status(401).json({ error: 'UI session missing' });
-    }
-
-    res.json({
-      ok: true,
-      visible: isUiVisible(uiToken),
-    });
-  });
-
-  // Session activity status endpoint - returns tracked activity phases for all sessions
-  // Used by UI on visibility restore to get accurate status without waiting for SSE
-  app.get('/api/session-activity', (_req, res) => {
-    res.json(getSessionActivitySnapshot());
-  });
-
   // Voice token endpoint - returns OpenAI TTS availability status
   registerTtsRoutes(app, { resolveZenModel, sayTTSCapability });
 
-  // New authoritative session status endpoints
-  // Server maintains the source of truth, clients only query
-
-  // GET /api/sessions/snapshot - Combined status + attention snapshot
-  app.get('/api/sessions/snapshot', (_req, res) => {
-    res.json({
-      statusSessions: getSessionStateSnapshot(),
-      attentionSessions: getSessionAttentionSnapshot(),
-      serverTime: Date.now()
-    });
-  });
-
-  // GET /api/sessions/status - Get status for all sessions
-  app.get('/api/sessions/status', (_req, res) => {
-    const snapshot = getSessionStateSnapshot();
-    res.json({
-      sessions: snapshot,
-      serverTime: Date.now()
-    });
-  });
-
-  // GET /api/sessions/:id/status - Get status for a specific session
-  app.get('/api/sessions/:id/status', (req, res) => {
-    const sessionId = req.params.id;
-    const state = getSessionState(sessionId);
-
-    if (!state) {
-      return res.status(404).json({
-        error: 'Session not found or no state available',
-        sessionId
-      });
-    }
-
-    res.json({
-      sessionId,
-      ...state
-    });
-  });
-
-  // Session attention tracking endpoints
-  // GET /api/sessions/attention - Get attention state for all sessions
-  app.get('/api/sessions/attention', (_req, res) => {
-    const snapshot = getSessionAttentionSnapshot();
-    res.json({
-      sessions: snapshot,
-      serverTime: Date.now()
-    });
-  });
-
-  // GET /api/sessions/:id/attention - Get attention state for a specific session
-  app.get('/api/sessions/:id/attention', (req, res) => {
-    const sessionId = req.params.id;
-    const state = getSessionAttentionState(sessionId);
-
-    if (!state) {
-      return res.status(404).json({
-        error: 'Session not found or no attention state available',
-        sessionId
-      });
-    }
-
-    res.json({
-      sessionId,
-      ...state
-    });
-  });
-
-  // POST /api/sessions/:id/view - Client reports viewing this session
-  app.post('/api/sessions/:id/view', (req, res) => {
-    const sessionId = req.params.id;
-    const clientId = req.headers['x-client-id'] || req.ip || 'anonymous';
-
-    markSessionViewed(sessionId, clientId);
-
-    res.json({
-      success: true,
-      sessionId,
-      viewed: true
-    });
-  });
-
-  // POST /api/sessions/:id/unview - Client reports leaving this session
-  app.post('/api/sessions/:id/unview', (req, res) => {
-    const sessionId = req.params.id;
-    const clientId = req.headers['x-client-id'] || req.ip || 'anonymous';
-
-    markSessionUnviewed(sessionId, clientId);
-
-    res.json({
-      success: true,
-      sessionId,
-      viewed: false
-    });
-  });
-
-  // POST /api/sessions/:id/message-sent - User sent a message in this session
-  app.post('/api/sessions/:id/message-sent', (req, res) => {
-    const sessionId = req.params.id;
-
-    markUserMessageSent(sessionId);
-
-    res.json({
-      success: true,
-      sessionId,
-      messageSent: true
-    });
+  registerNotificationRoutes(app, {
+    uiAuthController,
+    ensurePushInitialized,
+    getOrCreateVapidKeys,
+    getUiSessionTokenFromRequest,
+    readSettingsFromDiskMigrated,
+    writeSettingsToDisk,
+    addOrUpdatePushSubscription,
+    removePushSubscription,
+    updateUiVisibility,
+    isUiVisible,
+    getSessionActivitySnapshot,
+    getSessionStateSnapshot,
+    getSessionAttentionSnapshot,
+    getSessionState,
+    getSessionAttentionState,
+    markSessionViewed,
+    markSessionUnviewed,
+    markUserMessageSent,
+    setPushInitialized: (value) => {
+      pushInitialized = value === true;
+    },
   });
 
   app.get('/api/openchamber/update-check', async (req, res) => {

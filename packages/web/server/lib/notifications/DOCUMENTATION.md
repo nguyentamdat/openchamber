@@ -5,6 +5,7 @@ This module provides notification message preparation utilities for the web serv
 
 ## Entrypoints and structure
 - `packages/web/server/lib/notifications/index.js`: public entrypoint imported by `packages/web/server/index.js`.
+- `packages/web/server/lib/notifications/routes.js`: route registration for push, visibility, and session status/attention endpoints.
 - `packages/web/server/lib/notifications/message.js`: helper implementation module.
 - `packages/web/server/lib/notifications/message.test.js`: unit tests for notification message helpers.
 
@@ -13,6 +14,23 @@ This module provides notification message preparation utilities for the web serv
 ### Notifications API (re-exported from message.js)
 - `truncateNotificationText(text, maxLength)`: Truncates text to specified max length, appending `...` if truncated.
 - `prepareNotificationLastMessage({ message, settings, summarize })`: Prepares the last message for notification display, with optional summarization support.
+
+### Route registration API (routes.js)
+- `registerNotificationRoutes(app, dependencies)`: Registers notification-owned endpoints:
+  - `GET /api/push/vapid-public-key`
+  - `POST /api/push/subscribe`
+  - `DELETE /api/push/subscribe`
+  - `POST /api/push/visibility`
+  - `GET /api/push/visibility`
+  - `GET /api/session-activity`
+  - `GET /api/sessions/snapshot`
+  - `GET /api/sessions/status`
+  - `GET /api/sessions/:id/status`
+  - `GET /api/sessions/attention`
+  - `GET /api/sessions/:id/attention`
+  - `POST /api/sessions/:id/view`
+  - `POST /api/sessions/:id/unview`
+  - `POST /api/sessions/:id/message-sent`
 
 ## Constants
 
