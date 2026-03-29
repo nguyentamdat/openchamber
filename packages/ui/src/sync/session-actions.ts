@@ -35,6 +35,10 @@ function dirStore() {
   return _getDirectoryStore()
 }
 
+function dir() {
+  return _directory || undefined
+}
+
 // ---------------------------------------------------------------------------
 // Session CRUD
 // ---------------------------------------------------------------------------
@@ -77,7 +81,7 @@ function optimisticRemoveSession(sessionId: string) {
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function deleteSession(sessionId: string, _options?: Record<string, unknown>): Promise<boolean> {
   try {
-    await sdk().session.delete({ sessionID: sessionId })
+    await sdk().session.delete({ sessionID: sessionId, directory: dir() })
     optimisticRemoveSession(sessionId)
     const ui = useSessionUIStore.getState()
     if (ui.currentSessionId === sessionId) {
@@ -92,7 +96,7 @@ export async function deleteSession(sessionId: string, _options?: Record<string,
 
 export async function archiveSession(sessionId: string): Promise<boolean> {
   try {
-    await sdk().session.update({ sessionID: sessionId, time: { archived: Date.now() } })
+    await sdk().session.update({ sessionID: sessionId, directory: dir(), time: { archived: Date.now() } })
     optimisticRemoveSession(sessionId)
     const ui = useSessionUIStore.getState()
     if (ui.currentSessionId === sessionId) {
@@ -106,16 +110,16 @@ export async function archiveSession(sessionId: string): Promise<boolean> {
 }
 
 export async function updateSessionTitle(sessionId: string, title: string): Promise<void> {
-  await sdk().session.update({ sessionID: sessionId, title })
+  await sdk().session.update({ sessionID: sessionId, directory: dir(), title })
 }
 
 export async function shareSession(sessionId: string): Promise<Session | null> {
-  const result = await sdk().session.share({ sessionID: sessionId })
+  const result = await sdk().session.share({ sessionID: sessionId, directory: dir() })
   return result.data ?? null
 }
 
 export async function unshareSession(sessionId: string): Promise<Session | null> {
-  const result = await sdk().session.unshare({ sessionID: sessionId })
+  const result = await sdk().session.unshare({ sessionID: sessionId, directory: dir() })
   return result.data ?? null
 }
 
@@ -210,6 +214,7 @@ export async function sendMessage(
     if (isCommand) {
       await sdk().session.command({
         sessionID: sessionId,
+        directory: dir(),
         command: cmd!,
         arguments: tail.join(" "),
         agent,
@@ -220,6 +225,7 @@ export async function sendMessage(
     } else {
       await sdk().session.promptAsync({
         sessionID: sessionId,
+        directory: dir(),
         agent,
         model: { providerID, modelID },
         messageID,
@@ -256,7 +262,7 @@ export async function sendMessage(
 
 export async function abortCurrentOperation(sessionId: string): Promise<void> {
   try {
-    await sdk().session.abort({ sessionID: sessionId })
+    await sdk().session.abort({ sessionID: sessionId, directory: dir() })
   } catch (error) {
     console.error("[session-actions] abort failed", error)
   }
@@ -332,7 +338,7 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
   const status = state.session_status[sessionId]
   if (status && status.type !== "idle") {
     try {
-      await sdk().session.abort({ sessionID: sessionId })
+      await sdk().session.abort({ sessionID: sessionId, directory: dir() })
     } catch {
       // ignore abort errors
     }
@@ -373,7 +379,7 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
 
   // Call SDK and merge authoritative result into store
   try {
-    const result = await sdk().session.revert({ sessionID: sessionId, messageID: messageId })
+    const result = await sdk().session.revert({ sessionID: sessionId, directory: dir(), messageID: messageId })
     if (result.data) {
       const current = store.getState()
       const updated = [...current.session]
@@ -408,13 +414,13 @@ export async function unrevertSession(sessionId: string): Promise<void> {
   const status = state.session_status[sessionId]
   if (status && status.type !== "idle") {
     try {
-      await sdk().session.abort({ sessionID: sessionId })
+      await sdk().session.abort({ sessionID: sessionId, directory: dir() })
     } catch {
       // ignore
     }
   }
 
-  const result = await sdk().session.unrevert({ sessionID: sessionId })
+  const result = await sdk().session.unrevert({ sessionID: sessionId, directory: dir() })
   if (result.data) {
     const current = store.getState()
     const sessions = [...current.session]
@@ -447,7 +453,7 @@ export async function forkFromMessage(sessionId: string, messageId: string): Pro
     .join("\n")
     .trim()
 
-  const result = await sdk().session.fork({ sessionID: sessionId, messageID: messageId })
+  const result = await sdk().session.fork({ sessionID: sessionId, directory: dir(), messageID: messageId })
   if (!result.data) return
 
   const forkedSession = result.data

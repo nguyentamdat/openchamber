@@ -18,6 +18,7 @@ import { useConfigStore } from "@/stores/useConfigStore"
 import { useProjectsStore } from "@/stores/useProjectsStore"
 import { useDirectoryStore } from "@/stores/useDirectoryStore"
 import { useSessionFoldersStore } from "@/stores/useSessionFoldersStore"
+import { useCommandsStore } from "@/stores/useCommandsStore"
 import { getSafeStorage } from "@/stores/utils/safeStorage"
 import { markPendingUserSendAnimation } from "@/lib/userSendAnimation"
 import { flattenAssistantTextParts } from "@/lib/messages/messageText"
@@ -36,6 +37,74 @@ import { markSessionViewed } from "./notification-store"
 import { setActiveSession } from "./sync-context"
 
 export type { AttachedFile }
+
+// ---------------------------------------------------------------------------
+// Send routing — shell mode, slash commands, or normal prompt
+// ---------------------------------------------------------------------------
+
+function routeMessage(params: {
+  sessionId: string
+  content: string
+  providerID: string
+  modelID: string
+  agent?: string
+  variant?: string
+  inputMode?: "normal" | "shell"
+  files?: Array<{ type: "file"; mime: string; url: string; filename: string }>
+  additionalParts?: Array<{ text: string; synthetic?: boolean; files?: Array<{ type: "file"; mime: string; url: string; filename: string }> }>
+}): Promise<void> {
+  const sdk = opencodeClient.getSdkClient()
+
+  if (params.inputMode === "shell") {
+    const dir = opencodeClient.getDirectory() || undefined
+    return sdk.session.shell({
+      sessionID: params.sessionId,
+      directory: dir,
+      agent: params.agent,
+      model: { providerID: params.providerID, modelID: params.modelID },
+      command: params.content,
+    }).then(() => {})
+  }
+
+  // Slash commands — fire and forget, SSE delivers messages and status
+  if (params.content.startsWith("/")) {
+    const [head, ...tail] = params.content.split(" ")
+    const cmdName = head.slice(1)
+
+    const dirState = getDirectoryState()
+    const syncCommands = dirState?.command ?? []
+    const storeCommands = useCommandsStore.getState().commands
+
+    const isCommand = syncCommands.find((c) => c.name === cmdName)
+      || storeCommands.find((c) => c.name === cmdName)
+
+    if (isCommand) {
+      const dir = opencodeClient.getDirectory() || undefined
+      return sdk.session.command({
+        sessionID: params.sessionId,
+        directory: dir,
+        command: cmdName,
+        arguments: tail.join(" "),
+        agent: params.agent,
+        model: `${params.providerID}/${params.modelID}`,
+        variant: params.variant,
+        parts: params.files,
+      }).then(() => {})
+    }
+  }
+
+  // Normal prompt
+  return opencodeClient.sendMessage({
+    id: params.sessionId,
+    providerID: params.providerID,
+    modelID: params.modelID,
+    text: params.content,
+    agent: params.agent,
+    variant: params.variant,
+    files: params.files,
+    additionalParts: params.additionalParts,
+  }).then(() => {})
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -167,6 +236,7 @@ export type SessionUIState = {
     variant?: string,
     inputMode?: "normal" | "shell",
   ) => Promise<void>
+
   createSession: (title?: string, directoryOverride?: string | null, parentID?: string | null) => Promise<Session | null>
   deleteSession: (id: string, options?: Record<string, unknown>) => Promise<boolean>
   deleteSessions: (ids: string[], options?: Record<string, unknown>) => Promise<{ deletedIds: string[]; failedIds: string[] }>
@@ -644,11 +714,47 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
   isOpenChamberCreatedSession: (sessionId) => get().webUICreatedSessions.has(sessionId),
 
-  getContextUsage: () => {
+  getContextUsage: (contextLimit: number, outputLimit: number) => {
     if (get().newSessionDraft?.open) return null
     const sessionId = get().currentSessionId
     if (!sessionId) return null
-    return null
+
+    const messages = getSyncMessages(sessionId)
+    if (messages.length === 0) return null
+
+    // Find last assistant message with token data
+    type AssistantTokens = { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+    let lastTokens: AssistantTokens | undefined
+    let lastMessageId: string | undefined
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.role !== "assistant") continue
+      const tokens = (msg as { tokens?: AssistantTokens }).tokens
+      if (!tokens) continue
+      const total = tokens.input + tokens.output + tokens.reasoning + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
+      if (total > 0) {
+        lastTokens = tokens
+        lastMessageId = msg.id
+        break
+      }
+    }
+
+    if (!lastTokens) return null
+
+    const totalTokens = lastTokens.input + lastTokens.output + lastTokens.reasoning + (lastTokens.cache?.read ?? 0) + (lastTokens.cache?.write ?? 0)
+    const thresholdLimit = contextLimit > 0 ? contextLimit : 200000
+    const percentage = contextLimit > 0 ? Math.round((totalTokens / contextLimit) * 100) : 0
+    const normalizedOutput = outputLimit > 0 ? Math.round((lastTokens.output / outputLimit) * 100) : undefined
+
+    return {
+      totalTokens,
+      percentage,
+      contextLimit: contextLimit || 0,
+      outputLimit: outputLimit || undefined,
+      normalizedOutput,
+      thresholdLimit,
+      lastMessageId,
+    }
   },
 
   initializeNewOpenChamberSession: () => {
@@ -709,6 +815,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     agentMentionName?: string,
     additionalParts?: Array<{ text: string; attachments?: AttachedFile[]; synthetic?: boolean }>,
     variant?: string,
+    inputMode?: "normal" | "shell",
   ) => {
     const draft = get().newSessionDraft
     const trimmedAgent = typeof agent === "string" && agent.trim().length > 0 ? agent.trim() : undefined
@@ -780,13 +887,14 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         filename: a.filename,
       }))
 
-      await opencodeClient.sendMessage({
-        id: created.id,
+      await routeMessage({
+        sessionId: created.id,
+        content,
         providerID,
         modelID,
-        text: content,
         agent: effectiveDraftAgent,
         variant,
+        inputMode,
         files,
         additionalParts: mergedAdditionalParts?.map((p) => ({
           text: p.text,
@@ -853,13 +961,14 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       filename: a.filename,
     }))
 
-    await opencodeClient.sendMessage({
-      id: currentSessionId || "",
+    await routeMessage({
+      sessionId: currentSessionId || "",
+      content,
       providerID,
       modelID,
-      text: content,
       agent: effectiveAgent,
       variant,
+      inputMode,
       files,
       additionalParts: additionalParts?.map((p) => ({
         text: p.text,

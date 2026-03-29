@@ -1041,19 +1041,26 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                 .split(/\s+/)[0]
                 ?.toLowerCase();
 
-            // NEW: /undo - revert to last message (populates input with reverted message text)
             if (commandName === 'undo' && currentSessionId) {
                 await useSessionUIStore.getState().handleSlashUndo(currentSessionId);
-                // Don't clear message - pendingInputText will populate it with reverted message
                 scrollToBottom?.({ instant: true, force: true });
-                return; // Don't send to assistant
+                return;
             }
-            // NEW: /redo - unrevert or partial redo (populates input with message text)
             else if (commandName === 'redo' && currentSessionId) {
                 await useSessionUIStore.getState().handleSlashRedo(currentSessionId);
-                // Don't clear message - pendingInputText will populate it
                 scrollToBottom?.({ instant: true, force: true });
-                return; // Don't send to assistant
+                return;
+            }
+            else if (commandName === 'compact' && currentSessionId) {
+                const { opencodeClient } = await import('@/lib/opencode/client');
+                const sdk = opencodeClient.getSdkClient();
+                const configState = useConfigStore.getState();
+                await sdk.session.summarize({
+                    sessionID: currentSessionId,
+                    modelID: configState.currentModelId || '',
+                    providerID: configState.currentProviderId || '',
+                });
+                return;
             }
         }
 
