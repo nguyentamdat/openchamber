@@ -403,10 +403,15 @@ export const useGitStore = create<GitStore>()(
                 bumpDiffFetchGeneration(directory);
               }
 
+              // Preserve diffStats from previous status when light mode returns none
+              const mergedStatus = newStatus.diffStats === undefined && currentDirState.status?.diffStats
+                ? { ...newStatus, diffStats: currentDirState.status.diffStats }
+                : newStatus;
+
               newDirectories.set(directory, {
                 ...currentDirState,
                 isGitRepo: true,
-                status: newStatus,
+                status: mergedStatus,
                 diffCache: nextDiffCache,
                 lastRepoCheckAt: shouldProbeRepository ? now : currentDirState.lastRepoCheckAt,
                 lastStatusFetch: Date.now(),
