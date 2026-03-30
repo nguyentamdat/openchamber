@@ -2,7 +2,7 @@ import React, { memo } from 'react';
 import { RiCloseLine, RiMessage2Line } from '@remixicon/react';
 import { useMessageQueueStore, type QueuedMessage } from '@/stores/messageQueueStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
-import { useFileStore } from '@/stores/fileStore';
+import { useInputStore } from '@/sync/input-store';
 
 interface QueuedMessageChipProps {
     message: QueuedMessage;
@@ -84,10 +84,9 @@ export const QueuedMessageChips = memo(({ onEditMessage }: QueuedMessageChipsPro
         
         const popped = popToInput(currentSessionId, message.id);
         if (popped) {
-            // Restore attachments to file store if any
             if (popped.attachments && popped.attachments.length > 0) {
-                const currentAttachments = useFileStore.getState().attachedFiles;
-                useFileStore.setState({ 
+                const currentAttachments = useInputStore.getState().attachedFiles;
+                useInputStore.setState({ 
                     attachedFiles: [...currentAttachments, ...popped.attachments] 
                 });
             }

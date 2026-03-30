@@ -44,7 +44,6 @@ import { MobileSessionStatusBar } from './MobileSessionStatusBar';
 import { useAssistantStatus } from '@/hooks/useAssistantStatus';
 import { useCurrentSessionActivity } from '@/hooks/useSessionActivity';
 import { toast } from '@/components/ui';
-import { useFileStore } from '@/stores/fileStore';
 // useMessageStore removed — messages now come from sync system
 import { isTauriShell, isVSCodeRuntime } from '@/lib/desktop';
 import { isIMECompositionEvent } from '@/lib/ime';
@@ -84,6 +83,28 @@ const VS_CODE_DROP_DATA_TYPES = [
 ];
 
 const FILE_URI_PREFIX = 'file://';
+
+const encodeFilePath = (filepath: string): string => {
+    let normalized = filepath.replace(/\\/g, '/');
+    if (/^[A-Za-z]:/.test(normalized)) {
+        normalized = `/${normalized}`;
+    }
+    return normalized
+        .split('/')
+        .map((segment, index) => {
+            if (index === 1 && /^[A-Za-z]:$/.test(segment)) return segment;
+            return encodeURIComponent(segment);
+        })
+        .join('/');
+};
+
+const toServerFileUrl = (filepath: string): string => {
+    const normalized = filepath.replace(/\\/g, '/').trim();
+    if (normalized.toLowerCase().startsWith(FILE_URI_PREFIX)) {
+        return normalized;
+    }
+    return `file://${encodeFilePath(normalized)}`;
+};
 
 const isLikelyAbsolutePath = (value: string): boolean => (
     value.startsWith('/')
@@ -362,10 +383,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
     const isDesktopExpanded = isExpandedInput && !isMobile;
     const chatInputRadius = 'var(--radius-lg)';
 
-    const sendableAttachedFiles = React.useMemo(
-        () => attachedFiles.filter((file) => file.source !== 'server'),
-        [attachedFiles],
-    );
+    const sendableAttachedFiles = attachedFiles;
 
     const hasInlineMentionForHighlight = React.useMemo(() => {
         if (!message || !message.includes('@') || inputMode === 'shell') {
@@ -437,8 +455,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
 
     const sanitizeAttachmentsForSend = React.useCallback(
         (files: AttachedFile[] | undefined): AttachedFile[] => (files ?? [])
-            .filter((file) => file.source !== 'server')
-            .map((file) => ({ ...file })),
+            .map((file) => ({
+                ...file,
+                dataUrl: file.source === 'server' && file.serverPath
+                    ? toServerFileUrl(file.serverPath)
+                    : file.dataUrl,
+            })),
         [],
     );
 
@@ -509,7 +531,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                 filename,
                 mimeType: 'text/plain',
                 size: 0,
-                dataUrl: normalizedServerPath,
+                dataUrl: toServerFileUrl(normalizedServerPath),
                 source: 'server',
                 serverPath: normalizedServerPath,
             });
@@ -1121,21 +1143,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             if (normalized.includes('payload too large') || normalized.includes('413') || normalized.includes('entity too large')) {
                 toast.error('Attachments are too large to send. Please try reducing the number or size of images.');
                 if (allAttachments.length > 0) {
-                    useFileStore.setState({ attachedFiles: allAttachments });
+                    useInputStore.setState({ attachedFiles: allAttachments });
                 }
                 return;
             }
 
             if (isSoftNetworkError) {
                 if (allAttachments.length > 0) {
-                    useFileStore.setState({ attachedFiles: allAttachments });
+                    useInputStore.setState({ attachedFiles: allAttachments });
                     toast.error('Failed to send attachments. Try fewer files or smaller images.');
                 }
                 return;
             }
 
             if (allAttachments.length > 0) {
-                useFileStore.setState({ attachedFiles: allAttachments });
+                useInputStore.setState({ attachedFiles: allAttachments });
             }
             toast.error(rawMessage || 'Message failed to send. Attachments restored.');
         });
